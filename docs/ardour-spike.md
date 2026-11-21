@@ -44,36 +44,68 @@ EOF
 
 | Проверка | Статус |
 |---|---|
-| transport play/stop | 🔲 |
-| set_tempo 60→90→60 | 🔲 |
+| transport play/stop | ✅ (2026-11-22, Ilmir) |
+| set_tempo 60→90 через OSC | ✅ **BPM в Ardour стал 90.0** — второй хост подчинился шине |
 | get-фидбек состояния (OSC feedback) | 🔲 |
-| import MIDI через OSC | ❌ не существует (см. Phase B) |
+| import MIDI через OSC | ❌ не существует → Phase B |
 | export/render через OSC | ❌ вероятно нет (см. Phase B) |
 
-## Phase B — MIDI внутрь Ardour (по результатам Phase A)
+## Phase B — MIDI внутрь Ardour: инструкция
 
-OSC-сёрфейс Ardour не работает с нотами — два кандидата, решить на спайке:
+**Прямой ответ:** «просто импортировать .mid» Ardour умеет **только вручную**
+(Session → Import, или drag-drop файла на таймлайн — .mid он ест нативно,
+вплоть до раскладки каналов по трекам). OSC-сёрфейс нот не передаёт, а
+Lua-скрипты нельзя дёрнуть по OSC напрямую. Поэтому Phase B — три уровня:
 
-1. **Lua-скриптинг Ardour** (Session → Scripting): скрипт внутри Ardour
-   создаёт MIDI-трек и импортирует/создаёт клипы. Проверить в Lua-API:
-   импорт MIDI-файла (`Session` bindings) и создание клипов с нотами.
-   Если импорт файла есть — это наш путь, Python-адаптер дёргает скрипт.
-2. **midi_io.py в нашем репо** (~40 строк: mido → notes JSON) — если Lua
-   читать файл не умеет, конвертируем ourselves и вставляем ноты тем
-   каналом, который найдём (Lua create_clip + note insertion).
+### B.0 — сегодня, ноль кода (human-in-loop MVP)
 
-**Связка с midi-gen:** переписывать midi-gen НЕ нужно — он DAW-агностичен
-(файлы + пути). Поток: `generate_*` → `.mid` в workspace → Phase B-канал
-импортирует в Ardour → `adopt_loop` через OSC (темп) → Self-Check. Правило
-embed_tempo=True — только для standalone-файлов вне пайплайна.
+1. Агент: `generate_bassline/chords/drums` → `.mid` в workspace
+2. Вы: в Ardour **Session → Import** → выбрать файл(ы) → в диалоге
+   импорта отметить «MIDI-файлы», назначение — новые треки
+3. Агент: `set_tempo` через OSC (уже доказано) → Self-Check по баунсу
 
-**Рендер:** через OSC не скриптуется — варианты на спайке: GUI-export
-(пользователь), либо CLI-экспорт Ardour, либо(loopback-запись). Не блокер
-для адаптера: Self-Check работает по любому WAV.
+Один клик человеком на партию — честный MVP Wave 2, всё остальное
+автоматизировано.
+
+### B.1 — сделано: `core/midi_io.py`
+
+`mido → notes JSON` (`{start, end, note, velocity, channel}` в тиках,
+BPM только если файл темп несёт — контракт embed_tempo). Это ядро ЛЮБОГО
+автоматического пути: Lua-мосту не нужен свой MIDI-парсер (в Lua его нет),
+ноты конвертируем у себя и передаём JSON-ом. Тесты round-trip: 10/10.
+
+```python
+from core.midi_io import load_notes
+load_notes("workspace/bass.mid")   # → notes[] для вставки в Ardour
+```
+
+### B.2 — автоматизация (спайк следующей сессии)
+
+Найденная в Lua-API структура Ardour даёт механизм: **Session Script
+выполняется каждый аудио-цикл** — это готовый polling-мост (тот же паттерн,
+что наши wake-хуки):
+
+1. Session Script (Session → Scripting) проверяет раз в N циклов файл
+   `workspace/ardour_inbox.json` (команда: `import_midi` / `create_track`
+   с notes[] из midi_io)
+2. Команда исполняется через Lua-биндинги: `Session:new_midi_track {...}`
+   существует (подтверждено форумом), `Editor:import_files` + ImportStatus
+   существует для импорта файлов
+3. **Открытый вопрос спайка:** доступен ли `Editor` из контекста
+   session-script (или только из action-script) — проверить в Script
+   Console: `typeof(Editor)`; если нет — вариант: Session-only путь
+   (new_midi_track + вставка нот через LuaAPI.build_note) или action-script
+   + шорткат
+4. Рендер вне OSC: выбрать между GUI-export / CLI / loopback — не блокер,
+   Self-Check работает по любому WAV
+
+**Критерии B:** notes[] из midi_io превращаются в звучащий клип в
+Ardour-сессии без ручного импорта.
 
 ## Критерии завершения спайка
 
-- Phase A: transport + tempo из агента ✅/❌ (дата)
-- Phase B: выбран канал, `.mid` от midi-gen звучит в Ardour-сессии ✅/❌
+- Phase A: transport + tempo из агента — ✅ **2026-11-22**
+- Phase B: выбран канал, `.mid` от midi-gen звучит в Ardour-сессии 🔲
+  (B.0 доступен уже сейчас, B.2 — следующая сессия)
 - Решение: `src/mcp_servers/daw_ardour/` пишется или Wave 2 → REAPER
   (dawmcp уже готов — fallback без стыда)
