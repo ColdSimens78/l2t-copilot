@@ -1,0 +1,44 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Rust (нативные компоненты в этом репо, Волна 2+) ---
+target/
+**/*.rs.bk
+
+# --- Секреты и окружение ---
+.env
+.env.*
+*.local
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+*~
+
+# --- Редакторы ---
+.idea/
+.vscode/
+*.swp
+
+# --- Рендеры и сессии DAW: генерируются, в git не попадают ---
+*.wav
+*.aiff
+*.mp3
+*.flac
+*.scraft
+*.scraftz
+
+# ...кроме маленьких MIDI-лупов в examples (разрешаем явно)
+!examples/**/*.mid
+!examples/**/*.midi
