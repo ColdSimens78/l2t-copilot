@@ -106,6 +106,9 @@ pub struct BusState {
     /// Треки хоста (форма уточнится с DawBackend-хостом; пока пусто).
     pub tracks: Vec<Value>,
     pub engine: EngineState,
+    /// Имя сессии хоста (C6, ipc-контракт v0.2); None, пока хост не подключён.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,8 +257,11 @@ mod tests {
             key_marker: None,
             tracks: vec![],
             engine: EngineState::Down,
+            session_name: None,
         })
         .unwrap();
         assert_eq!(v["engine"], serde_json::json!("down"));
+        // C6 (v0.2): session_name опционален — отсутствует, а не null
+        assert!(v.get("session_name").is_none());
     }
 }

@@ -104,6 +104,29 @@ impl CockpitCore {
         Ok(report)
     }
 
+    /// C5 (ipc-контракт v0.2): analyze_loop с `copy_into_workspace` —
+    /// дроп-зона отдаёт путь вне workspace, а правило шины №1 требует,
+    /// чтобы всё живое в staging. Копируем в `staging/loops/` и анализируем
+    /// копию (X-Ray-эталон Self-Check привязывается к ней же).
+    pub async fn analyze_loop_copied(&mut self, path: &Path) -> CoreResult<XRayReport> {
+        self.ensure_staging()?;
+        let loops = self.staging_dir.join("loops");
+        std::fs::create_dir_all(&loops).map_err(|e| CoreError::Tool {
+            tool: "staging".into(),
+            message: format!("не создал {}: {e}", loops.display()),
+        })?;
+        let stem = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "loop.wav".into());
+        let dest = loops.join(format!("{}_{}", now_ms(), stem));
+        std::fs::copy(path, &dest).map_err(|e| CoreError::Tool {
+            tool: "analyze_loop".into(),
+            message: format!("не скопировал {} в workspace: {e}", path.display()),
+        })?;
+        self.analyze_loop(&dest).await
+    }
+
     /// Вызов суб-инструмента analyzer с журналированием; текст отчёта.
     async fn analyzer_text(&mut self, path: &Path, tool: &str) -> CoreResult<String> {
         let server = self
@@ -170,6 +193,12 @@ impl CockpitCore {
             status: SuggestionStatus::Generated,
         };
         self.suggestions.insert(tool, suggestion.clone());
+        // C2 (v0.2): превью по конвенции staging/<part>_v<N>.wav — рендерим
+        // сразу после генерации (best-effort: нет fluidsynth/soundfont —
+        // партия валидна, UI просто не найдёт wav и покажет «нет превью»).
+        if let Err(e) = crate::preview::render_preview(&file).await {
+            eprintln!("[preview] {} ({})", e, file.display());
+        }
         Ok(suggestion)
     }
 
@@ -246,6 +275,7 @@ impl CockpitCore {
             key_marker: None,
             tracks: vec![],
             engine: EngineState::Down,
+            session_name: None,
         }
     }
 

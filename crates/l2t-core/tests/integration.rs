@@ -129,6 +129,12 @@ async fn generate_part_produces_contract_suggestion() {
     assert_eq!(s1.notes.iter().map(|n| n.channel).collect::<Vec<_>>(), vec![0; 4]);
     let file1 = staging.join("bass_v1.mid");
     assert!(file1.is_file(), "стейджинг-артефакт по контракту");
+    // C2 (v0.2): превью по конвенции — если fluidsynth+SF на месте
+    if std::process::Command::new("fluidsynth").arg("--version").output().is_ok()
+        && l2t_core::preview::detect_soundfont().is_some()
+    {
+        assert!(staging.join("bass_v1.wav").is_file(), "превью-WAV по конвенции C2");
+    }
 
     // v2: regenerate с diff-параметром — стиль меняется, версия растёт
     let s2 = core
@@ -253,6 +259,15 @@ async fn analyze_loop_returns_xray_report_and_self_check() {
     assert!(check.tempo_match);
     assert_eq!(check.verdict, "ok");
     assert!((check.lufs_delta - 0.0).abs() < 0.05);
+
+    // C5 (v0.2): копия в staging/loops и анализ копии
+    let xray2 = core.analyze_loop_copied(&wav).await.expect("analyze_loop_copied");
+    assert!((xray2.bpm - xray.bpm).abs() < 0.01);
+    let loops: Vec<_> = std::fs::read_dir(core.staging_dir().join("loops"))
+        .expect("staging/loops существует")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(!loops.is_empty(), "копия лупа лежит в staging/loops");
 
     // контрактный get_bus_state: хоста нет — engine down, поля пустые
     let state = core.get_bus_state().await;
