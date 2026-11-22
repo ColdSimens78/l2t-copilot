@@ -136,8 +136,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::metadata(&bounce).map(|m| m.len()).unwrap_or(0)
     );
 
+    // --- 5. Жизненный цикл сессии ВНУТРИ roots (Follow-up, зазор №1):
+    //        new_session → tempo → save_session → open_session → inspect ---
+    let fresh = ws_path.join("spike_session.scraftz");
+    let _ = std::fs::remove_file(&fresh);
+    let (ms, v) = call(
+        &service,
+        "new_session",
+        json!({"name": "spike-fresh", "sample_rate": 44100, "template": "blank"}),
+        "new_session",
+    )
+    .await?;
+    println!("new_session_ms={} result={}", ms.as_millis(), compact(&v, 160));
+
+    let (ms, v) = call(
+        &service,
+        "execute",
+        json!({"command": "event.tempo", "params": {"bpm": 90}}),
+        "event.tempo(fresh)",
+    )
+    .await?;
+    println!("event.tempo_ms(fresh)={} result={v}", ms.as_millis());
+
+    let (ms, v) = call(
+        &service,
+        "save_session",
+        json!({"path": fresh.display().to_string()}),
+        "save_session",
+    )
+    .await?;
+    println!("save_session_ms={} result={}", ms.as_millis(), compact(&v, 160));
+    println!(
+        "session_file_exists={} size={}",
+        fresh.is_file(),
+        std::fs::metadata(&fresh).map(|m| m.len()).unwrap_or(0)
+    );
+
+    let (ms, v) = call(
+        &service,
+        "open_session",
+        json!({"path": fresh.display().to_string()}),
+        "open_session",
+    )
+    .await?;
+    println!("open_session_ms={} result={}", ms.as_millis(), compact(&v, 160));
+
+    // после reopen: темп-карта сохраняется (tempo = МАССИВ событий [{bpm,tick}]);
+    // имя сессии при open = стем файла (аргумент new_session — транзиентный)
+    let (_, v) = call(&service, "inspect_session", json!({"detail": "full"}), "inspect(reopen)").await?;
+    let (name, tempo) = (
+        v.get("name").and_then(Value::as_str).unwrap_or("?"),
+        v.get("tempo")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(|e| e.get("bpm"))
+            .and_then(Value::as_f64),
+    );
+    println!("reopen_name={name} reopen_tempo={tempo:?} tracks={}",
+        v.get("tracks").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0));
+
     // --- сводка для отчёта ---
     println!("cold_start_sec={:.2}", cold_start.as_secs_f64());
+    println!(
+        "session_lifecycle=verified tempo_persist={} name_from_file_stem={}",
+        tempo == Some(90.0),
+        name == "spike_session"
+    );
     service.cancel().await.ok();
     Ok(())
 }

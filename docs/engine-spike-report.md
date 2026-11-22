@@ -80,3 +80,73 @@ DawBackend-адаптер получает её бесплатно на любо
   `cargo run -p l2t-core --example engine_spike -- <workspace>`
 - Доказательства прогона: workspace/bounce_am90.wav (16 MB, RIFF PCM,
   LUFS −19.22 в ответе движка)
+
+## 7. Follow-up (2026-11-22, факт-добор по зазорам отчёта)
+
+### 7.1 Зазор №1 закрыт: жизненный цикл сессии ВНУТРИ roots — работает
+
+Тот же engine_spike-прогон, фаза 5 (`new_session → event.tempo 90 →
+save_session → open_session → inspect full`):
+
+| Операция | Время | Результат |
+|---|---|---|
+| `new_session {name:"spike-fresh", sample_rate:44100, template:"blank"}` | 0 мс | `{"name":"spike-fresh","sample_rate":44100}` |
+| `event.tempo {bpm:90}` на новой сессии | 0 мс | `{"bpm":90.0,"tick":0}` |
+| `save_session {path: <ws>/spike_session.scraftz}` | **65 мс** | 2501 байт, `audio_files_written:0` |
+| `open_session {path}` | 0 мс | `{"missing":[],"name":"spike_session","tracks":0}` — битых ссылок нет |
+| `inspect full` после reopen | — | **tempo = `[{bpm:90.0, tick:0}]` — темп-карта персистентна** |
+
+Два семантических факта (критичны для DawBackend/adopt_loop):
+
+1. **`tempo` в inspect — МАССИВ событий темп-карты `[{bpm, tick}]`, а не
+   объект `{bpm}`** (наша первая экстракция промахнулась — выловлено
+   спайком). Контракт adopt_loop: после «применить темп лупа» сверяем
+   `tempo[last].bpm`, не `tempo.bpm`.
+2. **Имя сессии при open_session = стем файла**, аргумент `name` из
+   new_session — транзиентный (перезаписывается). DawBackend должен
+   именовать файл правильно, а не полагаться на arg name.
+
+Рабочий лист `spike_session.scraftz` + `t2.scraftz` остаются в workspace
+как доказательство (пересоздаются прогоном).
+
+### 7.2 План контракт-теста (зазор №2: v0.5.0 ↔ v0.20.1)
+
+**Цель:** доказать, что команды, которые DawBackend реально зовёт,
+возвращают на standalone v0.20.1 совместимую форму — или задокументировать
+дельты и закрыть их адаптером ДО переключения.
+
+**Команды DawBackend → engine-команды** (по docs/dawbackend-spec.md):
+
+| DawBackend | engine-команда | Fixture-аргументы | Инвариант формы ответа |
+|---|---|---|---|
+| `get_session` | `session.inspect` (`inspect_session full`) | пустая blank-сессия | ключи из 24-набора спайка; `tempo: [{bpm,tick}…]`, `tracks: []`, `sample_rate: number` |
+| `set_tempo` | `execute event.tempo {bpm:90}` | 90 | `{"bpm": number, "tick": number}` |
+| `adopt_loop` (C1) | `event.tempo` + `markers.add {name, at, kind}` | bpm из лупа, kind="key" | как выше + маркер в `markers[]` инспекта |
+| `import_midi` | `execute file.import_midi {path}` | `bass_am90.mid` (5 нот) | `{"tracks": [number…]}`, после инспекта: у трека `clip.notes == 5` |
+| `add_marker` | `execute markers.add {name, at, kind}` | "A minor", at=0 | маркер читается инспектом |
+| `render` | `execute file.bounce_mix {path, format:"wav", start, end}` | диапазон 0…4 такта | ключи `bytes/lufs/path/peak_db/seconds/true_peak_db`, WAV на диске |
+| откат | `execute edit.undo` | после import | инспект показывает откат (track count −1) |
+
+**Механика прогона:**
+
+1. Канонический fixture: `bass_am90.mid` + blank-сессия 44100 —
+   байт-в-байт одинаков для обеих версий (фикстура уже в workspace).
+2. Один драйвер (паттерн engine_spike: stdio JSON-RPC, bounded-таймауты)
+   прогоняет таблицу на **обеих версиях**: v0.5.0 — через ZCode-плагин-мост
+   (stdio из конфига), v0.20.1 — через `soundcraft-cli mcp`.
+3. Ответ каждой команды → `golden-<version>.json` (коммитятся в репо).
+4. **Сверка формы, не значений**: множества ключей top-level, типы,
+   enum-значения. НЕ сверяем: абсолютные LUFS/размеры/ids/длины — они
+   контент-зависимы (урок LUFS в §2).
+5. Критерий PASS: формы идентичны ИЛИ каждая дельта закрыта решением
+   (адаптер-шим в DawBackend / upstream issue). Предварительная дельта
+   уже известна из спайка: поле `true_peak_db` (v0.20.1) vs `tp` (как в
+   ZCode-обёртке v0.5.0 возвращала `TP −4.78` — сверить точное имя ключа
+   на золоте v0.5.0).
+6. Дешёвая предпроверка версий: `parity()` + `list_commands()` на обеих
+   сторонах — каталог команд diff-ается до прогона (ловит переименования
+   типа `event.*`/`file.*`/`session.*`).
+
+**Место реализации после ратификации:** `crates/l2t-core/tests/contract_engine.rs`
+(golden-файлы коммитятся; тест skip-ается при отсутствии бинарей —
+сложившийся паттерн репозитория).
