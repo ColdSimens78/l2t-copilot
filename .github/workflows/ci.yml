@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Python: pytest tests/ (midi-gen + qwen_bridge, только моки) ---
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e '.[dev]'
+      - run: pytest tests/ -q
+
+      # --- Rust: cargo test в crates/l2t-core (моки + skip живых слотов) ---
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/l2t-core
+      - run: cargo test --manifest-path crates/l2t-core/Cargo.toml
