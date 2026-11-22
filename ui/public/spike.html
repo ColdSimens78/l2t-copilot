@@ -35,9 +35,14 @@
 <h2>4. Drag-and-drop из файлового менеджера</h2>
 <div id="drop">перетащи файл(ы) сюда (из менеджера файлов)</div>
 <pre id="dnd">слушатель tauri://drag-drop и HTML5-drop зарегистрированы; ждём событие…</pre>
+<h2>5. Пересоздание окна (ретест tauri #12589)</h2>
+<pre id="recreate">…</pre>
+<button id="recreate-btn">▶ создать → закрыть → создать заново</button>
 
 <script>
-const report = (k, v) => window.__TAURI__?.core.invoke("spike_report", { key: k, value: String(v) });
+// Дочернее окно пересоздания не тестирует само себя (рекурсия = коллизии лейблов).
+const CHILD = new URLSearchParams(location.search).has("child");
+const report = (k, v) => CHILD || window.__TAURI__?.core.invoke("spike_report", { key: k, value: String(v) });
 const set = (id, cls, txt) => { const el = document.getElementById(id); el.className = cls; el.textContent = txt; };
 
 // ---------- 1. Шрифты ----------
@@ -123,13 +128,54 @@ async function checkDnd() {
   });
 }
 
-checkFonts().then(() => report("boot", "ok"));
+if (!CHILD) {
+  checkFonts().then(() => report("boot", "ok"));
+  checkDnd();
+  // спайк-чеклист: always-on-top, луп и пересоздание пробуем сразу (без клика)
+  checkAot();
+  checkAudio();
+  checkRecreate();
+}
 document.getElementById("audio-btn").onclick = checkAudio;
 document.getElementById("aot-btn").onclick = checkAot;
-checkDnd();
-// always-on-top пробуем сразу: это спайк-чеклист, не юзерский сценарий
-checkAot();
-checkAudio();
+
+// ---------- 5. Пересоздание окна (tauri #12589: create-after-close) ----------
+async function checkRecreate() {
+  const el = document.getElementById("recreate");
+  const t0 = performance.now();
+  const log = [];
+  try {
+    const T = window.__TAURI__;
+    report("tauri_ns", Object.keys(T).join(","));
+    const WW = T.webviewWindow?.WebviewWindow ?? T.window?.WebviewWindow ?? T.webview?.WebviewWindow;
+    if (typeof WW !== "function") throw new Error("WebviewWindow не найден: " + Object.keys(T.webview ?? {}).join(",") + " / ww=" + Object.keys(T.webviewWindow ?? {}).join(","));
+    // окно №1
+    const w1 = new WW("spike-child-1", { url: "spike.html?child=1", title: "L2T SPIKE child", width: 320, height: 200 });
+    await w1.once("tauri://created"); // ждём реальное создание
+    log.push("create#1 ok @" + Math.round(performance.now() - t0) + "ms");
+    await new Promise(r => setTimeout(r, 200)); // settle: мгновенный close ловит гонку регистрации (прогон 8)
+    await w1.close();
+    log.push("close#1 ok @" + Math.round(performance.now() - t0) + "ms");
+    // окно №2 тем же лейблом сразу после закрытия — суть кверка #12589
+    const w2 = new WW("spike-child-1", { url: "spike.html?child=2", title: "L2T SPIKE child 2", width: 320, height: 200 });
+    const created = Promise.race([
+      w2.once("tauri://created"),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("created не пришёл за 8 с (кверк #12589 подтверждён?)")), 8000)),
+    ]);
+    await created;
+    log.push("create#2 (тот же label после close) ok @" + Math.round(performance.now() - t0) + "ms");
+    await new Promise(r => setTimeout(r, 200));
+    await w2.close();
+    log.push("close#2 ok — пересоздание работает");
+    el.className = "ok";
+    el.textContent = log.join("\n");
+    report("recreate_12589", "ok " + log.join(" | "));
+  } catch (e) {
+    el.className = "fail";
+    el.textContent = log.join("\n") + "\nОШИБКА: " + e;
+    report("recreate_12589", "fail " + log.join(" | ") + " | error:" + e);
+  }
+}
 </script>
 </body>
 </html>

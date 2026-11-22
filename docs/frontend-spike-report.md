@@ -46,3 +46,23 @@ cd ui/src-tauri && cargo build && DISPLAY=:0 ./target/debug/app
 ## 5. Коммит
 
 Авторизован скоуп: `git add ui/ pnpm-workspace.yaml docs/frontend-spike-report.md` — сообщение `feat(ui): cockpit scaffold + ghost notes (mock IPC)`. `pnpm-workspace.yaml` включён явно: это часть моего скаффолда (п.2 задачи, workspace-определение, без него `pnpm install` в ui/ не работает в монорепо), не чужой файл. `node_modules`/`dist`/`target` покрыты gitignore.
+
+## 6. Дополнение: ретест кверков Разведчика (прогон 6–9, тот же день)
+
+Проверки после вердикта Папы на кверки Разведчика. Харнесс расширен (`ui/public/spike.html` §5, permission'ы `core:webview:allow-create-webview-window` / `allow-webview-close` / `core:window:allow-close` добавлены явно).
+
+| Кверк | Вердикт | Доказательство |
+|---|---|---|
+| **#12589 — пересоздание окна** (create после close, тот же label) | ✅ **НЕ воспроизводится** (tauri crate 2.12.7, tao 0.37.3, WebKitGTK 2.54, KWin X11) | `SPIKE recreate_12589=ok create#1 ok @1ms \| close#1 ok @203ms \| create#2 (тот же label после close) ok @203ms \| close#2 ok`. FL-паттерн «окно на функцию» (v1) не заблокирован. |
+| — нюанс к #12589: **мгновенный close после `tauri://created`** | ⚠️ гонка регистрации | без settle-паузы `close()` ловит «window not found» (прогон 8: close @2 мс после created; прогон 7a при 53-мс зазоре — прошёл). Рецепт: ≥200 мс между create и close. Не блокер: в продукте окна живут дольше. |
+| — нюанс к #12589: **дочерние окна и харнесс** | 🟡 дизайн-правило | child-окно грузит ту же страницу → автотесты в нём создают рекурсию окон + label-коллизии («window not found»/«close not allowed» в прогонах 7–8). Зафиксировано `?child`-guard'ом: дети не тестируют себя. В продукте: не грузить в child окна страницы с агентными автотестами; permission-ACL для child-окон задавать явно (вызов из окна вне `windows:["main"]` = denied). |
+| **#11814 — фокус-кража** | 🟡 принято как дизайн-ограничение (без автоматического теста) | API-скрытие окна не тестировалось программно; правило для AI Dock/флотирующих панелей — не требовать no-focus (согласовано в спеке v0.4 §4.5). |
+| **HTML-audio gapless-луп — повтор прогона** | ✅ улучшение: луп **стартовал и обёртывался без остановки** | `SPIKE audio_play=started`, `audio_wraps=1`, `audio_stalls=0` (прогон 4/6/8/9 стабильно; в прогоне 3 был AbortError из-за гонки паузы с неуспевшим стартовать play — убрано автосоуллуп-тестом). Слуховой тест шва остаётся за владельцем. |
+
+Методологическая заметка: сборка спайка делается из **изолированной копии** src-tauri (commit-версия Cargo.toml/lib.rs), если рабочий `l2t-core` Кодера в момент сборки не компилируется — интеграция Tauri↔l2t-core в работе (незакоммичено), спайку ядро не нужно.
+
+## 7. Обновлённые коммиты (фаза A+, тот же день)
+
+1. `feat(ui): mirror ipc-contract v0.2 in TS types` — `ui/src/types/contract.ts` (+4 типа v0.2: AdoptLoop, DawRender, previewWavPath, BusState.session_name; AnalyzeLoopInput.copy_into_workspace) + перевод импортов + version/status в моках; удалён мой первый черновик `ui/src/contract/suggestion.ts`. Коммит **без** чужих незакоммиченных файлов (Cargo.toml/Cargo.lock/lib.rs/tests Кодера не тронуты — явные пути).
+2. `test(ui): spike retest #12589 window-recreation + audio loop evidence` — `ui/public/spike.html`, `ui/src-tauri/capabilities/default.json`, этот отчёт.
+
