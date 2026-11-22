@@ -184,6 +184,13 @@ def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else list(argv)
     if argv and argv[0] == "--cli":
         print(json.dumps(_cli(argv[1:]), indent=2, ensure_ascii=False))
+    elif argv:
+        # Неизвестный первый аргумент — usage-ошибка, а не молчаливый старт
+        # stdio-сервера (урок Wave 2: "l2t-midi-gen chords ..." зависал бы).
+        print("usage: l2t-midi-gen            # MCP stdio (для конфига клиента)\n"
+              "       l2t-midi-gen --cli ... # оффлайн-генерация (см. README)",
+              file=sys.stderr)
+        sys.exit(2)
     else:
         mcp.run("stdio")
 
