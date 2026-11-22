@@ -20,23 +20,25 @@ use serde_json::{json, Map, Value};
 use crate::bus::{BusServer, DEFAULT_CALL_TIMEOUT};
 use crate::config::{resolve_audio_analyzer, resolve_midi_gen, ServerConfig};
 use crate::contract::{
-    AcceptResult, BusLog, BusLogStatus, BusState, EngineState, ManifestEntry, Part,
+    AcceptResult, AdoptResult, BusLog, BusLogStatus, BusState, EngineState, Part,
     SelfCheckReport, Suggestion, SuggestionStatus, XRayReport,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::notes;
+use crate::staging;
 use crate::{analyzer_parse as ap, keys};
 
 /// Ядро кокпита: единственный владелец MCP-клиентов шины.
 pub struct CockpitCore {
     audio_analyzer: Option<BusServer>,
     midi_gen: Option<BusServer>,
+    /// Слот «Движок» (SoundCraft standalone, ратифицирован владельцем).
+    /// Опционален: без бинаря кокпит живёт — engine: down.
+    engine: Option<BusServer>,
     call_timeout: Duration,
     staging_dir: PathBuf,
     /// Текущее (последнее) предложение по каждой партии.
     suggestions: HashMap<Part, Suggestion>,
-    /// Лог решений (staging/manifest.json).
-    manifest: Vec<ManifestEntry>,
     /// Последний проанализированный луп — эталон run_self_check.
     last_loop_xray: Option<XRayReport>,
     /// Журнал шины (источник Tauri-события bus_log).
@@ -58,17 +60,24 @@ impl CockpitCore {
     ) -> Self {
         let audio_analyzer = BusServer::connect(audio_analyzer).await.ok();
         let midi_gen = BusServer::connect(midi_gen).await.ok();
-        let manifest = read_manifest(&staging_dir);
         Self {
             audio_analyzer,
             midi_gen,
+            engine: None,
             call_timeout: DEFAULT_CALL_TIMEOUT,
             staging_dir,
             suggestions: HashMap::new(),
-            manifest,
             last_loop_xray: None,
             bus_log: VecDeque::new(),
         }
+    }
+
+    /// Подключить слот «Движок» (SoundCraft standalone). Битый движок не
+    /// убивает ядро — get_bus_state останется Down.
+    pub async fn attach_engine(&mut self, config: ServerConfig) -> CoreResult<()> {
+        let server = BusServer::connect(config).await?;
+        self.engine = Some(server);
+        Ok(())
     }
 
     // ------------------------------------------------------ analyze_loop ----
@@ -127,6 +136,53 @@ impl CockpitCore {
         self.analyze_loop(&dest).await
     }
 
+    /// **adopt_loop** (C1, ipc-контракт v0.2): применить BPM и тональность
+    /// лупа к сессии движка — `event.tempo {bpm}` + key-маркер по конвенции
+    /// имени `Key: <тональность>` (kind движок нормализует в "Marker",
+    /// конвенция — в имени; факт спайка). Вызывается ДО generate/accept:
+    /// клипы считаются по текущей темп-карте сессии.
+    pub async fn adopt_loop(&mut self, bpm: f64, key: &str, source: &str) -> CoreResult<AdoptResult> {
+        if !(20.0..=300.0).contains(&bpm) {
+            return Err(CoreError::Tool {
+                tool: "event.tempo".into(),
+                message: format!("bpm должен быть 20..300, получил {bpm}"),
+            });
+        }
+        let (pc, mode) = keys::parse_key(key).map_err(|e| CoreError::Tool {
+            tool: "adopt_loop".into(),
+            message: e,
+        })?;
+        let key = format!("{} {}", crate::keys::PC_NAMES[pc as usize], mode.as_str());
+        let engine = self.engine.as_ref().ok_or_else(|| CoreError::Tool {
+            tool: "daw".into(),
+            message: "движок SoundCraft не подключён (см. get_mcp_slots / Screen 0)".into(),
+        })?;
+
+        let (ms, _) = call_logged(
+            &mut self.bus_log,
+            engine,
+            "execute",
+            "adopt_loop",
+            json!({"command": "event.tempo", "params": {"bpm": bpm}}),
+            self.call_timeout,
+        )
+        .await?;
+        let marker_name = format!("Key: {key}");
+        let (_, marker) = call_logged(
+            &mut self.bus_log,
+            engine,
+            "execute",
+            "adopt_loop",
+            json!({"command": "markers.add",
+                   "params": {"name": marker_name, "at": 0, "kind": "key"}}),
+            self.call_timeout,
+        )
+        .await?;
+        println!("[adopt_loop] {key} @ {bpm} BPM от {source:?}: {} мс, маркер {marker}",
+            ms.as_millis());
+        Ok(AdoptResult { tempo: bpm, marker_name })
+    }
+
     /// Вызов суб-инструмента analyzer с журналированием; текст отчёта.
     async fn analyzer_text(&mut self, path: &Path, tool: &str) -> CoreResult<String> {
         let server = self
@@ -135,8 +191,15 @@ impl CockpitCore {
             .ok_or_else(|| unavailable("audio-analyzer"))?;
         let mut args = Map::new();
         args.insert("path".into(), json!(path.display().to_string()));
-        let v = call_logged(&mut self.bus_log, server, tool, "analyze_loop", args, self.call_timeout)
-            .await?;
+        let (_, v) = call_logged(
+            &mut self.bus_log,
+            server,
+            tool,
+            "analyze_loop",
+            Value::Object(args),
+            self.call_timeout,
+        )
+        .await?;
         // текстовый режим: call_json отдал {"raw": "..."} — разворачиваем
         let text = v
             .as_object()
@@ -169,12 +232,12 @@ impl CockpitCore {
         eff.insert("output_path".into(), json!(file.display().to_string()));
 
         let server = self.midi_gen.as_ref().ok_or_else(|| unavailable("midi-gen"))?;
-        let res = call_logged(
+        let (_, res) = call_logged(
             &mut self.bus_log,
             server,
             tool.mcp_tool(),
             "generate_part",
-            eff.clone(),
+            Value::Object(eff.clone()),
             self.call_timeout,
         )
         .await?;
@@ -193,6 +256,8 @@ impl CockpitCore {
             status: SuggestionStatus::Generated,
         };
         self.suggestions.insert(tool, suggestion.clone());
+        // §5.3: полный снимок suggestion → manifest (decision: None = generated)
+        staging::staging_append(&self.staging_dir, &suggestion)?;
         // C2 (v0.2): превью по конвенции staging/<part>_v<N>.wav — рендерим
         // сразу после генерации (best-effort: нет fluidsynth/soundfont —
         // партия валидна, UI просто не найдёт wav и покажет «нет превью»).
@@ -223,25 +288,77 @@ impl CockpitCore {
 
     // --------------------------------------------------- accept / reject ----
 
-    /// Контрактная команда: требует DawBackend.import_midi. Хост-слот —
-    /// следующий этап; пока честная bounded-ошибка (решение НЕ логируется:
-    /// материализации нет).
-    pub fn accept_part(&mut self, part: Part, _version: u64) -> CoreResult<AcceptResult> {
-        if !self.suggestions.contains_key(&part) {
+    /// Контрактная команда: импортировать партию в сессию движка
+    /// (`file.import_midi` на staging-артефакт) + запись решения в
+    /// manifest. Порядок контура: adopt_loop ДО accept — клип считается
+    /// по текущей темп-карте сессии (факт спайка: length в сэмплах).
+    pub async fn accept_part(&mut self, part: Part, version: u64) -> CoreResult<AcceptResult> {
+        let current = self.suggestions.get(&part).ok_or_else(|| CoreError::Tool {
+            tool: "daw.import_midi".into(),
+            message: format!("нет предложения для партии {}", part_str(part)),
+        })?;
+        if current.version != version {
             return Err(CoreError::Tool {
                 tool: "daw.import_midi".into(),
-                message: format!("нет предложения для партии {}", part_str(part)),
+                message: format!("версия {version} не текущая (текущая {})", current.version),
             });
         }
-        Err(CoreError::Tool {
+        let mid = self.staging_dir.join(format!("{}_v{version}.mid", part_str(part)));
+        if !mid.is_file() {
+            return Err(CoreError::Tool {
+                tool: "daw.import_midi".into(),
+                message: format!("нет стейджинг-артефакта {}", mid.display()),
+            });
+        }
+        let engine = self.engine.as_ref().ok_or_else(|| CoreError::Tool {
             tool: "daw.import_midi".into(),
-            message: "DAW-хост не подключён (DawBackend — следующий этап); \
-                      импорт невозможен, решение не залогировано"
-                .into(),
-        })
+            message: "движок SoundCraft не подключён (см. get_mcp_slots / Screen 0)".into(),
+        })?;
+        let (ms, res) = call_logged(
+            &mut self.bus_log,
+            engine,
+            "execute",
+            "accept_part",
+            json!({"command": "file.import_midi",
+                   "params": {"path": mid.display().to_string()}}),
+            self.call_timeout,
+        )
+        .await?;
+        let ids: Vec<u64> = res
+            .get("tracks")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|x| x.as_u64()).collect())
+            .unwrap_or_default();
+        // имена треков (TS-зеркало: imported_tracks: string[] — тост UI)
+        let (_, insp) = call_logged(
+            &mut self.bus_log,
+            engine,
+            "inspect_session",
+            "accept_part",
+            json!({"detail": "full"}),
+            self.call_timeout,
+        )
+        .await?;
+        let names: Vec<String> = insp
+            .get("tracks")
+            .and_then(Value::as_array)
+            .map(|tracks| {
+                tracks
+                    .iter()
+                    .filter(|t| t.get("id").and_then(Value::as_u64).map(|id| ids.contains(&id)).unwrap_or(false))
+                    .filter_map(|t| t.get("name").and_then(Value::as_str).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        self.suggestions.get_mut(&part).unwrap().status = SuggestionStatus::Accepted;
+        staging::staging_log_decision(&self.staging_dir, part, version, SuggestionStatus::Accepted)?;
+        println!("[accept] {part:?} v{version}: {} мс, треки {names:?}", ms.as_millis());
+        Ok(AcceptResult { imported_tracks: names })
     }
 
-    /// Контрактная команда: пометить версию отклонённой + запись в manifest.
+    /// Контрактная команда: пометить версию отклонённой + запись в manifest
+    /// (manifest-only: материализации нет).
     pub fn reject_part(&mut self, part: Part, version: u64) -> CoreResult<()> {
         let Some(s) = self.suggestions.get_mut(&part) else {
             return Err(CoreError::Tool {
@@ -256,26 +373,91 @@ impl CockpitCore {
             });
         }
         s.status = SuggestionStatus::Rejected;
-        self.manifest.push(ManifestEntry {
-            part,
-            version,
-            decision: SuggestionStatus::Rejected,
-            ts: now_ms(),
-        });
-        write_manifest(&self.staging_dir, &self.manifest)
+        staging::staging_log_decision(&self.staging_dir, part, version, SuggestionStatus::Rejected)?;
+        Ok(())
     }
 
     // ----------------------------------------------- get_bus_state и пр. ----
 
-    /// Контрактная команда: состояние хоста (daw.get_session). На этапе 1
-    /// хоста нет — engine: down, поля пустые (Фронтендер рисует Screen 0).
-    pub async fn get_bus_state(&self) -> BusState {
+    /// Контрактная команда: состояние DAW-сессии из движка (inspect full).
+    /// Движок не подключён → engine: down, поля пустые (Screen 0).
+    pub async fn get_bus_state(&mut self) -> BusState {
+        let Some(engine) = self.engine.as_ref() else {
+            return BusState {
+                tempo: None,
+                key_marker: None,
+                tracks: vec![],
+                engine: EngineState::Down,
+                session_name: None,
+            };
+        };
+        let Ok((_, v)) = call_logged(
+            &mut self.bus_log,
+            engine,
+            "inspect_session",
+            "get_bus_state",
+            json!({"detail": "full"}),
+            self.call_timeout,
+        )
+        .await
+        else {
+            return BusState {
+                tempo: None,
+                key_marker: None,
+                tracks: vec![],
+                engine: EngineState::Down,
+                session_name: None,
+            };
+        };
+        // tempo = МАССИВ событий темп-карты [{bpm, tick}] — берём последнее
+        let tempo = v
+            .get("tempo")
+            .and_then(Value::as_array)
+            .and_then(|a| a.last())
+            .and_then(|e| e.get("bpm"))
+            .and_then(Value::as_f64);
+        // key-маркер — конвенция имени "Key: <тональность>" (adopt_loop)
+        let key_marker = v
+            .get("markers")
+            .and_then(Value::as_array)
+            .and_then(|ms| {
+                ms.iter().rev().find_map(|m| {
+                    m.get("name")
+                        .and_then(Value::as_str)
+                        .filter(|n| n.starts_with("Key: "))
+                        .map(|n| n["Key: ".len()..].trim().to_string())
+                })
+            });
+        // компактная проекция треков (TS tracks: unknown[])
+        let tracks: Vec<Value> = v
+            .get("tracks")
+            .and_then(Value::as_array)
+            .map(|ts| {
+                ts.iter()
+                    .map(|t| {
+                        json!({
+                            "id": t.get("id"),
+                            "name": t.get("name"),
+                            "kind": t.get("kind"),
+                            "instrument": t.get("instrument"),
+                            "clips": t.get("clips").and_then(Value::as_array).map(|cs| {
+                                cs.iter().map(|c| json!({
+                                    "start": c.get("start"),
+                                    "end": c.get("end"),
+                                    "notes": c.get("notes"),
+                                })).collect::<Vec<_>>()
+                            }).unwrap_or_default(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         BusState {
-            tempo: None,
-            key_marker: None,
-            tracks: vec![],
-            engine: EngineState::Down,
-            session_name: None,
+            tempo,
+            key_marker,
+            tracks,
+            engine: EngineState::Up,
+            session_name: v.get("name").and_then(Value::as_str).map(str::to_string),
         }
     }
 
@@ -331,6 +513,26 @@ impl CockpitCore {
         json!({"ok": self.audio_analyzer.is_some() || self.midi_gen.is_some()})
     }
 
+    /// Bounce сессии движком (`file.bounce_mix`) — правило №5: ядро
+    /// оркестрирует, не синтезирует. Путь — внутри automation-roots.
+    pub async fn bounce_engine(&mut self, path: &Path) -> CoreResult<Value> {
+        let engine = self.engine.as_ref().ok_or_else(|| CoreError::Tool {
+            tool: "file.bounce_mix".into(),
+            message: "движок SoundCraft не подключён".into(),
+        })?;
+        let (_, v) = call_logged(
+            &mut self.bus_log,
+            engine,
+            "execute",
+            "bounce_engine",
+            json!({"command": "file.bounce_mix",
+                   "params": {"path": path.display().to_string(), "format": "wav"}}),
+            self.call_timeout,
+        )
+        .await?;
+        Ok(v)
+    }
+
     /// Превью-партии: оффлайн-рендер staging-.mid в WAV сайдкаром FluidSynth
     /// (правило №5: ядро не синтезирует, только оркестрирует; фронт
     /// проигрывает готовый WAV). Не входит в ipc-контракт v0.1 — внутренний
@@ -381,11 +583,14 @@ async fn call_logged(
     server: &BusServer,
     tool: &str,
     command: &str,
-    args: Map<String, Value>,
+    args: Value,
     timeout: Duration,
-) -> CoreResult<Value> {
+) -> CoreResult<(Duration, Value)> {
     let started = std::time::Instant::now();
-    let res = server.call_json(tool, args, timeout).await;
+    let res = server
+        .call_json(tool, args.as_object().cloned().unwrap_or_default(), timeout)
+        .await;
+    let ms = started.elapsed();
     let status = match &res {
         Ok(_) => BusLogStatus::Ok,
         Err(CoreError::Timeout { .. }) => BusLogStatus::Timeout,
@@ -396,9 +601,9 @@ async fn call_logged(
         tool: tool.into(),
         command: command.into(),
         status,
-        ms: started.elapsed().as_millis() as u64,
+        ms: ms.as_millis() as u64,
     });
-    res
+    res.map(|v| (ms, v))
 }
 
 fn part_str(part: Part) -> &'static str {
@@ -448,26 +653,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn read_manifest(dir: &Path) -> Vec<ManifestEntry> {
-    let path = dir.join("manifest.json");
-    std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
-}
-
-fn write_manifest(dir: &Path, entries: &[ManifestEntry]) -> CoreResult<()> {
-    std::fs::create_dir_all(dir).map_err(|e| CoreError::Tool {
-        tool: "manifest".into(),
-        message: format!("не создал {}: {e}", dir.display()),
-    })?;
-    let path = dir.join("manifest.json");
-    let json = serde_json::to_vec_pretty(entries).map_err(|e| CoreError::Tool {
-        tool: "manifest".into(),
-        message: format!("сериализация manifest: {e}"),
-    })?;
-    std::fs::write(&path, json).map_err(|e| CoreError::Tool {
-        tool: "manifest".into(),
-        message: format!("не записал {}: {e}", path.display()),
-    })
-}
 
 fn unavailable(slot: &str) -> CoreError {
     CoreError::Tool {

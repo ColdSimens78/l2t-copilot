@@ -119,10 +119,20 @@ pub enum EngineState {
     Down,
 }
 
-/// Выход `accept_part`.
+/// Выход `accept_part`: имена созданных движком треков (TS-зеркало v0.2:
+/// `imported_tracks: string[]` — для тоста «импортировано в MIDI 1»).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceptResult {
-    pub imported_tracks: Vec<Value>,
+    pub imported_tracks: Vec<String>,
+}
+
+/// Выход `adopt_loop` (C1, ipc-контракт v0.2): tempo применён, key-маркер
+/// создан по конвенции имени `Key: <тональность>` (kind движок
+/// нормализует в "Marker", конвенция — в имени).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdoptResult {
+    pub tempo: f64,
+    pub marker_name: String,
 }
 
 /// Выход `run_self_check`.
@@ -205,13 +215,14 @@ pub struct HostStatus {
 
 // ------------------------------------------------------------ manifest ------
 
-/// Запись лога решений в staging/manifest.json (Acceptance Rate, §5.3).
+/// Запись staging/manifest.json (§5.3 proposal, Acceptance Rate): полный
+/// снимок suggestion-инстанса + решение (None = ещё не решено).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ManifestEntry {
-    pub part: Part,
-    pub version: u64,
-    pub decision: SuggestionStatus,
-    /// Unix-ms.
+pub struct ManifestRecord {
+    pub suggestion: Suggestion,
+    /// None = generated (ожидает решения); Some = решено.
+    pub decision: Option<SuggestionStatus>,
+    /// Unix-ms последнего изменения записи.
     pub ts: u64,
 }
 

@@ -17,12 +17,13 @@ pub mod facade;
 pub mod keys;
 pub mod notes;
 pub mod preview;
+pub mod staging;
 
 pub use bus::{BusServer, DEFAULT_CALL_TIMEOUT, INSPECT_TIMEOUT};
 pub use config::{resolve_audio_analyzer, resolve_midi_gen, resolve_soundcraft, ServerConfig};
 pub use contract::{
-    AcceptResult, BusLog, BusState, EngineState, Note, Part, SelfCheckReport, Suggestion,
-    SuggestionStatus, XRayReport,
+    AcceptResult, AdoptResult, BusLog, BusState, EngineState, Note, Part, SelfCheckReport,
+    Suggestion, SuggestionStatus, XRayReport,
 };
 pub use error::{CoreError, CoreResult};
 pub use facade::CockpitCore;

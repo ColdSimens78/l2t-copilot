@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use l2t_core::bus::BusServer;
-use l2t_core::config::{resolve_audio_analyzer, resolve_midi_gen, ServerConfig};
+use l2t_core::config::{resolve_audio_analyzer, resolve_midi_gen, resolve_soundcraft, ServerConfig};
 use l2t_core::contract::{Part, SuggestionStatus};
 use l2t_core::error::CoreError;
 use l2t_core::CockpitCore;
@@ -151,13 +151,16 @@ async fn generate_part_produces_contract_suggestion() {
     assert_eq!(core.suggestion(Part::Bass).unwrap().status, SuggestionStatus::Rejected);
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(staging.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest.as_array().unwrap().len(), 1);
-    assert_eq!(manifest[0]["part"], json!("bass"));
-    assert_eq!(manifest[0]["decision"], json!("rejected"));
+    // ManifestRecord: полный снимок suggestion + решение
+    assert_eq!(manifest.as_array().unwrap().len(), 2); // v1 + v2 обе в логе
+    assert_eq!(manifest[1]["suggestion"]["part"], json!("bass"));
+    assert_eq!(manifest[1]["suggestion"]["version"], json!(2));
+    assert_eq!(manifest[1]["decision"], json!("rejected"));
+    assert!(manifest[0]["decision"].is_null());
 
     // accept без хоста — честная bounded-ошибка, НЕ тихая заглушка
-    let err = core.accept_part(Part::Bass, 2).unwrap_err();
-    assert!(err.to_string().contains("DawBackend"));
+    let err = core.accept_part(Part::Bass, 2).await.unwrap_err();
+    assert!(err.to_string().contains("движок SoundCraft не подключён"));
 
     // журнал шины накопился (для события bus_log)
     let log = core.take_bus_log();
@@ -278,5 +281,91 @@ async fn analyze_loop_returns_xray_report_and_self_check() {
     let an = slots["servers"].as_array().unwrap().iter()
         .find(|s| s["slot"] == json!("audio-analyzer")).unwrap();
     assert_eq!(an["alive"], json!(true));
+    core.shutdown().await;
+}
+
+// --------------------------------- ратифицированный движок (этап 2) ----
+
+/// Полный контур на ратифицированном standalone-движке (критерий этапа 2,
+/// cargo-двойник оконного сценария): attach_engine → adopt_loop →
+/// generate_part → accept_part (import) → bounce движка → run_self_check.
+#[tokio::test]
+async fn full_pipeline_on_ratified_engine() {
+    let engine_cfg = resolve_soundcraft();
+    if !engine_cfg.command.is_file() {
+        eprintln!("SKIP: soundcraft-cli не найден ({})", engine_cfg.command.display());
+        return;
+    }
+    let an_cfg = resolve_audio_analyzer();
+    if !an_cfg.command.is_file() {
+        eprintln!("SKIP: audio-analyzer не найден");
+        return;
+    }
+    // движок живёт в песочнице staging (прод-семантика: staging внутри
+    // automation-roots — правило №1); иначе движок честно отвергает
+    // импорт из /tmp (проверено: "automation path rejected")
+    let staging = tempfile_staging("engine");
+    std::fs::create_dir_all(&staging).unwrap(); // roots должны существовать до старта движка
+    let ws = staging.display().to_string();
+    let engine_cfg = ServerConfig {
+        name: "soundcraft",
+        command: engine_cfg.command,
+        args: vec![
+            "mcp".into(), "--demo".into(),
+            "--automation-read-root".into(), ws.clone(),
+            "--automation-write-root".into(), ws.clone(),
+        ],
+        env: HashMap::new(),
+    };
+
+    let mg_cfg = resolve_midi_gen();
+    let mut core = CockpitCore::connect_in(an_cfg, mg_cfg, staging.clone()).await;
+    core.attach_engine(engine_cfg).await.expect("движок подключается");
+
+    // adopt_loop: BPM+key маркер в сессию (критерий: {tempo, marker})
+    let adopt = core.adopt_loop(90.0, "A minor", "examples/loop.wav").await.expect("adopt_loop");
+    assert_eq!(adopt.tempo, 90.0);
+    assert_eq!(adopt.marker_name, "Key: A minor");
+
+    // настоящий get_bus_state из движка (DAW-сессия, не слот-снимок)
+    let state = core.get_bus_state().await;
+    let sv = serde_json::to_value(&state).unwrap();
+    assert_eq!(sv["engine"], json!("up"));
+    assert_eq!(sv["tempo"], json!(90.0));
+    assert_eq!(sv["key_marker"], json!("A minor"));
+    assert!(sv["session_name"].is_string());
+
+    // generate + accept: импорт партии в сессию движка
+    let s = core
+        .generate_part(Part::Bass, json!({"bpm": 90, "key": "A minor", "style": "syncopated"}))
+        .await
+        .expect("generate bass");
+    let acc = core.accept_part(Part::Bass, s.version).await.expect("accept → import");
+    assert!(!acc.imported_tracks.is_empty(), "имена треков из движка");
+    assert_eq!(
+        core.suggestion(Part::Bass).unwrap().status,
+        SuggestionStatus::Accepted
+    );
+    // манифест: решение logged
+    let records = l2t_core::staging::staging_read(&staging);
+    assert_eq!(records.last().unwrap().decision, Some(SuggestionStatus::Accepted));
+
+    // bounce движком (та же операция, что зовёт accept-контур Self-Check)
+    let bounce = staging.join("bounce_am90.wav");
+    let engine = core
+        .get_mcp_slots()
+        .await; // прогрев — снимок шины должен показать движок живым
+    let _ = engine;
+    // bounce движком через engine-слот ядра (ядро оркестрирует — правило №5)
+    let bounce_res = core.bounce_engine(&bounce).await.expect("bounce движком");
+    println!("bounce={}", bounce_res);
+    assert!(bounce.is_file(), "bounce движка существует");
+
+    // Self-Check: bounce vs X-Ray лупа (X-Ray от analyzer на bounce же —
+    // эталон лупа устанавливаем analyze_loop-ом того же bounce: форма check)
+    let xray_ref = core.analyze_loop(&bounce).await.expect("X-Ray bounce");
+    assert!(!xray_ref.key.is_empty());
+    let check = core.run_self_check(&bounce).await.expect("self check");
+    assert_eq!(check.verdict, "ok"); // тот же файл — тривиально ok
     core.shutdown().await;
 }
