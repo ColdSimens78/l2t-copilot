@@ -9,6 +9,8 @@
 //! продолжается параллельно основной работе.
 
 use std::io::Write;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use l2t_core::contract::{
     AcceptResult, BusState, EngineState, HostStatus, Part, SelfCheckReport, Suggestion,
@@ -172,11 +174,84 @@ async fn render_preview(mid_path: String) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+// ------------------------------------------------------------- e2e ------
+
+/// E2E-самопроверка «команда из webview» (этап 1, финал): после загрузки
+/// страницы (при L2T_E2E=1) инъектим JS, который из КОНТЕКСТА ВЕБВЬЮ зовёт
+/// те же invoke-команды, что и React: analyze_loop (examples/, CC0) →
+/// generate_part → render_preview. Результаты — через spike_report в
+/// stdout ядра (SPIKE-строки) — доказательство цепочки webview → l2t-core
+/// → живой midi-gen → .mid → fluidsynth → .wav.
+static E2E_DONE: AtomicBool = AtomicBool::new(false);
+
+fn e2e_js() -> Option<String> {
+    // CC0-лупы Разведчика; берём первый найденный FLAC
+    let examples = PathBuf::from("/home/ilmir/l2t-copilot/examples");
+    let loop_wav = std::fs::read_dir(&examples)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "flac"))?;
+    let loop_path = loop_wav.display().to_string().replace('\'', "");
+    Some(format!(
+        r#"(async () => {{
+  const t = window.__TAURI__;
+  if (!t) return;
+  // Tauri v2: invoke живёт в core (v1 — топ-уровень); поддержим оба
+  const invoke = (t.core && t.core.invoke) ? t.core.invoke : t.invoke;
+  const say = (k, v) => invoke('spike_report', {{ key: k, value: String(v) }}).catch(() => {{}});
+  try {{
+    const xray = await invoke('analyze_loop', {{ path: '{loop_path}' }});
+    await say('e2e_loop_path', '{loop_path}');
+    await say('e2e_xray', JSON.stringify({{ bpm: xray.bpm, key: xray.key, key_conf: xray.key_confidence }}));
+    const s = await invoke('generate_part', {{ tool: 'bass', params: {{ bpm: 90, key: 'A minor', style: 'syncopated' }} }});
+    const mid = s.params.output_path;
+    await say('e2e_bass', JSON.stringify({{ version: s.version, notes: s.notes.length, mid }}));
+    const wav = await invoke('render_preview', {{ midPath: mid }});
+    await say('e2e_preview', wav);
+    await say('e2e_done', 'ok');
+  }} catch (e) {{
+    await say('e2e_error', (e && e.message) ? e.message : String(e));
+  }}
+}})();"#,
+        loop_path = loop_path,
+    ))
+}
+
+fn run_e2e_once(webview: &tauri::Webview) {
+    if !cfg!(debug_assertions) || std::env::var_os("L2T_E2E").is_none_or(|v| v != "1") {
+        return;
+    }
+    println!("SPIKE e2e_page_load=seen");
+    let _ = std::io::stdout().flush();
+    if E2E_DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    match e2e_js() {
+        Some(js) => {
+            let _ = std::fs::write("/tmp/l2t-e2e.js", &js);
+            println!("SPIKE e2e_js_len={}", js.len());
+            if let Err(e) = webview.eval(&js) {
+                println!("SPIKE e2e_error=eval: {e}");
+            }
+        }
+        None => println!("SPIKE e2e_error=нет примера для анализа"),
+    }
+    let _ = std::io::stdout().flush();
+}
+
 // ------------------------------------------------------------- вход ------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .on_page_load(|webview, payload| {
+            // страница (spike.html или React из devUrl) загрузилась — можно
+            // звать invoke из контекста окна
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                run_e2e_once(webview);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             spike_report,
             analyze_loop,
