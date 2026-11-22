@@ -10,6 +10,7 @@ mcp 1.x — FastMCP, mcp 2.x — MCPServer (переименование API).
 
 from __future__ import annotations
 
+import functools
 import json
 import sys
 
@@ -18,9 +19,29 @@ try:
 except ImportError:  # mcp SDK 2.x
     from mcp.server.mcpserver import MCPServer as FastMCP
 
+try:
+    from mcp.server.mcpserver.exceptions import ToolError  # SDK 2.x
+except ImportError:
+    ToolError = None  # SDK 1.x: FastMCP сам превращает исключения в isError-текст
+
 from mcp_servers.midi_gen import logic as lg
 
 mcp = FastMCP("midi-gen")
+
+
+def _bounded(fn):
+    """На SDK 2.x произвольное исключение теряет текст isError (доносится только
+    ToolError) — оборачиваем ValueError/OSError в ToolError, чтобы агент всегда
+    видел причину (урок Кодера, qwen_bridge)."""
+    if ToolError is None:
+        return fn
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (ValueError, FileNotFoundError, OSError) as e:
+            raise ToolError(str(e)) from e
+    return wrapped
 
 SANDBOX_NOTE = ("Note: SoundCraft (ZCode plugin sandbox) only imports files that live "
                 "inside the ZCode workspace — write there or copy before importing.")
@@ -30,6 +51,7 @@ TEMPO_NOTE = ("Default false — SoundCraft's file.import_midi applies an embedd
 
 
 @mcp.tool()
+@_bounded
 def generate_bassline(bpm: int, key: str, output_path: str,
                       style: str = "basic", embed_tempo: bool = False) -> dict:
     """Generate a one-bar bassline MIDI file in the given key.
@@ -66,6 +88,7 @@ def generate_bassline(bpm: int, key: str, output_path: str,
 
 
 @mcp.tool()
+@_bounded
 def generate_chord_progression(bpm: int, key: str, output_path: str,
                                bars: int = 4, embed_tempo: bool = False,
                                voicing: str = "voiceled") -> dict:
@@ -117,6 +140,7 @@ def generate_chord_progression(bpm: int, key: str, output_path: str,
 
 
 @mcp.tool()
+@_bounded
 def generate_drum_pattern(bpm: int, output_path: str, style: str = "basic",
                           bars: int = 1, embed_tempo: bool = False,
                           variation: bool = False) -> dict:
