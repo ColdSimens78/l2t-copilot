@@ -109,8 +109,12 @@ async fn accept_part(
     version: u64,
 ) -> Result<AcceptResult, String> {
     let mut core = core.lock().await;
-    let result = core.accept_part(part, version).map_err(|e| e.to_string())?;
+    let result = core.accept_part(part, version).await.map_err(|e| e.to_string())?;
     emit_bus_log(&app, &mut core);
+    // статус сменился на accepted — фронт обязан увидеть новую версию
+    if let Some(s) = core.suggestion(part).cloned() {
+        emit_suggestion(&app, &s);
+    }
     Ok(result)
 }
 
@@ -174,6 +178,36 @@ async fn render_preview(mid_path: String) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// adopt_loop (C1, контракт v0.2): BPM+key лупа → сессия движка
+/// (event.tempo + key-маркер «Key: <тоналность>»).
+#[tauri::command]
+async fn adopt_loop(
+    app: AppHandle,
+    core: State<'_, Mutex<CockpitCore>>,
+    bpm: f64,
+    key: String,
+    source: String,
+) -> Result<l2t_core::contract::AdoptResult, String> {
+    let mut core = core.lock().await;
+    let result = core.adopt_loop(bpm, &key, &source).await.map_err(|e| e.to_string())?;
+    emit_bus_log(&app, &mut core);
+    Ok(result)
+}
+
+/// Bounce сессии движком (правило №5: ядро оркестрирует). Вне таблицы
+/// v0.2 (daw.render — optional с хост-клиентом); путь внутри roots.
+#[tauri::command]
+async fn bounce(
+    app: AppHandle,
+    core: State<'_, Mutex<CockpitCore>>,
+    path: String,
+) -> Result<Value, String> {
+    let mut core = core.lock().await;
+    let result = core.bounce_engine(std::path::Path::new(&path)).await.map_err(|e| e.to_string())?;
+    emit_bus_log(&app, &mut core);
+    Ok(result)
+}
+
 // ------------------------------------------------------------- e2e ------
 
 /// E2E-самопроверка «команда из webview» (этап 1, финал): после загрузки
@@ -193,6 +227,10 @@ fn e2e_js() -> Option<String> {
         .map(|e| e.path())
         .find(|p| p.extension().is_some_and(|x| x == "flac"))?;
     let loop_path = loop_wav.display().to_string().replace('\'', "");
+    // bounce пишется в workspace движка (roots пресета)
+    let bounce_path = std::env::var("L2T_SOUNDCRAFT_WORKSPACE")
+        .unwrap_or_else(|_| l2t_core::config::SOUNDCRAFT_WORKSPACE.into())
+        + "/bounce_e2e.wav";
     Some(format!(
         r#"(async () => {{
   const t = window.__TAURI__;
@@ -204,17 +242,30 @@ fn e2e_js() -> Option<String> {
     const xray = await invoke('analyze_loop', {{ path: '{loop_path}' }});
     await say('e2e_loop_path', '{loop_path}');
     await say('e2e_xray', JSON.stringify({{ bpm: xray.bpm, key: xray.key, key_conf: xray.key_confidence }}));
-    const s = await invoke('generate_part', {{ tool: 'bass', params: {{ bpm: 90, key: 'A minor', style: 'syncopated' }} }});
+    // Полный контур этапа 2 (критерий): adopt → bus → generate → preview
+    // → accept → bounce → self-check
+    const adopt = await invoke('adopt_loop', {{ bpm: xray.bpm, key: xray.key, source: 'e2e-loop' }});
+    await say('e2e_adopt', JSON.stringify(adopt));
+    const st = await invoke('get_bus_state');
+    await say('e2e_bus', JSON.stringify({{ engine: st.engine, tempo: st.tempo, key: st.key_marker, tracks: st.tracks.length, session: st.session_name }}));
+    const s = await invoke('generate_part', {{ tool: 'bass', params: {{ bpm: xray.bpm, key: xray.key, style: 'syncopated' }} }});
     const mid = s.params.output_path;
     await say('e2e_bass', JSON.stringify({{ version: s.version, notes: s.notes.length, mid }}));
     const wav = await invoke('render_preview', {{ midPath: mid }});
     await say('e2e_preview', wav);
+    const acc = await invoke('accept_part', {{ part: 'bass', version: s.version }});
+    await say('e2e_accept', JSON.stringify(acc));
+    const bounce = await invoke('bounce', {{ path: '{bounce_path}' }});
+    await say('e2e_bounce', JSON.stringify(bounce));
+    const check = await invoke('run_self_check', {{ bouncePath: '{bounce_path}' }});
+    await say('e2e_selfcheck', JSON.stringify(check));
     await say('e2e_done', 'ok');
   }} catch (e) {{
     await say('e2e_error', (e && e.message) ? e.message : String(e));
   }}
 }})();"#,
         loop_path = loop_path,
+        bounce_path = bounce_path,
     ))
 }
 
@@ -262,19 +313,18 @@ pub fn run() {
             get_bus_state,
             get_mcp_slots,
             run_self_check,
-            render_preview
+            render_preview,
+            adopt_loop,
+            bounce
         ])
         .setup(|app| {
-            // Поднять шину (stdio-клиенты) и расшарить ядро командам.
+            // Поднять шину: analyzer + midi-gen + ратифицированный движок
+            // (roots на workspace, staging внутри roots) — CockpitCore::connect().
             // Битый слот не убивает приложение — get_mcp_slots покажет его.
             let core = tauri::async_runtime::block_on(CockpitCore::connect());
+            let engine_state = if core.has_engine() { EngineState::Up } else { EngineState::Down };
             app.manage(Mutex::new(core));
-            // Хост ещё не подключён (DawBackend — следующий этап): фронт
-            // сразу знает, что рисовать Screen 0.
-            let _ = app.handle().emit(
-                "host_status",
-                HostStatus { engine: EngineState::Down },
-            );
+            let _ = app.handle().emit("host_status", HostStatus { engine: engine_state });
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()

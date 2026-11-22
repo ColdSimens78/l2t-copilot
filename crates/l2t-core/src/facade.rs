@@ -46,10 +46,23 @@ pub struct CockpitCore {
 }
 
 impl CockpitCore {
-    /// Поднять серверы шины; стейджинг — во временном каталоге.
+    /// Прод-подключение кокпита: analyzer + midi-gen + ратифицированный
+    /// движок (roots на workspace владельца) + staging ВНУТРИ workspace
+    /// (правило №1: песочница движка должна покрывать стейджинг — иначе
+    /// импорт партий отвергается, факт e2e). Битые слоты не убивают ядро.
     pub async fn connect() -> Self {
-        let staging = std::env::temp_dir().join("l2t-staging");
-        Self::connect_in(resolve_audio_analyzer(), resolve_midi_gen(), staging).await
+        let ws = std::env::var("L2T_SOUNDCRAFT_WORKSPACE")
+            .unwrap_or_else(|_| crate::config::SOUNDCRAFT_WORKSPACE.into());
+        let mut core =
+            Self::connect_in(resolve_audio_analyzer(), resolve_midi_gen(), PathBuf::from(&ws).join("staging")).await;
+        if crate::config::resolve_soundcraft().command.is_file() {
+            if let Err(e) = core.attach_engine(crate::config::resolve_soundcraft()).await {
+                eprintln!("[engine] не поднялся: {e}");
+            } else {
+                let _ = core.session_new("cockpit").await;
+            }
+        }
+        core
     }
 
     /// Все зависимости — явными аргументами (тесты и будущий Tauri-слой).
@@ -78,6 +91,11 @@ impl CockpitCore {
         let server = BusServer::connect(config).await?;
         self.engine = Some(server);
         Ok(())
+    }
+
+    /// Подключён ли слот движка (для host_status при старте кокпита).
+    pub fn has_engine(&self) -> bool {
+        self.engine.is_some()
     }
 
     // ------------------------------------------------------ analyze_loop ----
@@ -228,6 +246,11 @@ impl CockpitCore {
                 message: "params должен быть JSON-объектом".into(),
             })?;
         self.ensure_staging()?;
+        // bpm из X-Ray бывает дробным (рубато: 139.7) — генераторы принимают
+        // целые: ядро нормализует (контракт-тест примечание №7 в ipc-contract)
+        if let Some(bpm) = eff.get("bpm").and_then(Value::as_f64) {
+            eff.insert("bpm".into(), json!(bpm.round() as i64));
+        }
         let file = self.staging_dir.join(format!("{}_v{version}.mid", part_str(tool)));
         eff.insert("output_path".into(), json!(file.display().to_string()));
 
@@ -511,6 +534,25 @@ impl CockpitCore {
 
     pub async fn health(&self) -> Value {
         json!({"ok": self.audio_analyzer.is_some() || self.midi_gen.is_some()})
+    }
+
+    /// Новая пустая сессия в движке (headless-воркфлоу — follow-up спайка:
+    /// create/save/open внутри roots работает). Best-effort при старте кокпита.
+    pub async fn session_new(&mut self, name: &str) -> CoreResult<Value> {
+        let engine = self.engine.as_ref().ok_or_else(|| CoreError::Tool {
+            tool: "new_session".into(),
+            message: "движок SoundCraft не подключён".into(),
+        })?;
+        let (_, v) = call_logged(
+            &mut self.bus_log,
+            engine,
+            "new_session",
+            "session_new",
+            json!({"name": name, "sample_rate": 44100, "template": "blank"}),
+            self.call_timeout,
+        )
+        .await?;
+        Ok(v)
     }
 
     /// Bounce сессии движком (`file.bounce_mix`) — правило №5: ядро
