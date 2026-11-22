@@ -279,7 +279,7 @@ impl CockpitCore {
 
     /// Быстрая проверка живости слотов (Screen 0 «Разбудить движок»).
     /// ВНЕ ipc-контракта: снимок MCP-слотов шины для AI Dock/инспектора.
-    pub async fn bus_slots(&self) -> Value {
+    pub async fn get_mcp_slots(&self) -> Value {
         let mut servers = Vec::new();
         for (slot, server) in
             [("audio-analyzer", &self.audio_analyzer), ("midi-gen", &self.midi_gen)]
@@ -434,6 +434,6 @@ fn write_manifest(dir: &Path, entries: &[ManifestEntry]) -> CoreResult<()> {
 fn unavailable(slot: &str) -> CoreError {
     CoreError::Tool {
         tool: slot.into(),
-        message: "сервер слота не подключён (см. bus_slots)".into(),
+        message: "сервер слота не подключён (см. get_mcp_slots)".into(),
     }
 }

@@ -258,8 +258,8 @@ async fn analyze_loop_returns_xray_report_and_self_check() {
     let state = core.get_bus_state().await;
     assert_eq!(serde_json::to_value(&state).unwrap()["engine"], json!("down"));
 
-    // а слоты шины видит и внутренний снимок bus_slots
-    let slots = core.bus_slots().await;
+    // а слоты шины видит и внутренний снимок get_mcp_slots
+    let slots = core.get_mcp_slots().await;
     let an = slots["servers"].as_array().unwrap().iter()
         .find(|s| s["slot"] == json!("audio-analyzer")).unwrap();
     assert_eq!(an["alive"], json!(true));
