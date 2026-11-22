@@ -79,6 +79,39 @@ pub fn resolve_audio_analyzer() -> ServerConfig {
     }
 }
 
+pub const SOUNDCRAFT_BIN: &str = "/home/ilmir/bin/soundcraft-cli";
+pub const SOUNDCRAFT_WORKSPACE: &str = "/home/ilmir/music-workspace";
+
+/// Пресет слота «Движок»: SoundCraft v0.20.1 standalone headless-MCP
+/// (спайк Исход 3 — docs/oss-recon-engines.md, docs/engine-spike-report.md).
+///
+/// `--demo` поднимает in-process движок без GUI; automation-roots —
+/// песочница правила шины №1, встроенная в сам движок. workspace задаётся
+/// env L2T_SOUNDCRAFT_WORKSPACE (по умолчанию ~/music-workspace); бинарь —
+/// L2T_SOUNDCRAFT. Слот пока НЕ входит в CockpitCore: подключение движка —
+/// после ратификации DawBackend владельцем (спайк → facts).
+pub fn resolve_soundcraft() -> ServerConfig {
+    let command = env::var_os("L2T_SOUNDCRAFT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(SOUNDCRAFT_BIN));
+    let workspace =
+        env::var_os("L2T_SOUNDCRAFT_WORKSPACE").unwrap_or_else(|| SOUNDCRAFT_WORKSPACE.into());
+    let ws = workspace.to_string_lossy().to_string();
+    ServerConfig {
+        name: "soundcraft",
+        command,
+        args: vec![
+            "mcp".into(),
+            "--demo".into(),
+            "--automation-read-root".into(),
+            ws.clone(),
+            "--automation-write-root".into(),
+            ws,
+        ],
+        env: HashMap::new(),
+    }
+}
+
 /// Все серверы шины, которыми владеет ядро на этапе 1.
 pub fn bus_configs() -> Vec<ServerConfig> {
     vec![resolve_audio_analyzer(), resolve_midi_gen()]

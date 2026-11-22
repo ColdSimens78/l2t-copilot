@@ -19,7 +19,7 @@ pub mod notes;
 pub mod preview;
 
 pub use bus::{BusServer, DEFAULT_CALL_TIMEOUT, INSPECT_TIMEOUT};
-pub use config::{resolve_audio_analyzer, resolve_midi_gen, ServerConfig};
+pub use config::{resolve_audio_analyzer, resolve_midi_gen, resolve_soundcraft, ServerConfig};
 pub use contract::{
     AcceptResult, BusLog, BusState, EngineState, Note, Part, SelfCheckReport, Suggestion,
     SuggestionStatus, XRayReport,
