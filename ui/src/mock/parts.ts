@@ -5,9 +5,9 @@
  * тики 480 TPQ (1 такт = 1920). Ghost-версии — альтернативные параметры того же
  * генератора (контракт suggestion, proposal §5.1).
  */
-import type { MidiNote, PartId, Suggestion } from "@/contract/suggestion";
+import type { Note, PartId, Suggestion } from "@/types/contract";
 
-export const bass_real: MidiNote[] = [
+export const bass_real: Note[] = [
     { note: 45, start: 0, end: 360, velocity: 100, channel: 0 },
     { note: 45, start: 720, end: 1200, velocity: 90, channel: 0 },
     { note: 52, start: 1200, end: 1440, velocity: 95, channel: 0 },
@@ -30,7 +30,7 @@ export const bass_real: MidiNote[] = [
     { note: 48, start: 7440, end: 7680, velocity: 100, channel: 0 },
 ];
 
-export const chords_real: MidiNote[] = [
+export const chords_real: Note[] = [
     { note: 48, start: 0, end: 1920, velocity: 90, channel: 0 },
     { note: 52, start: 0, end: 1920, velocity: 90, channel: 0 },
     { note: 57, start: 0, end: 1920, velocity: 90, channel: 0 },
@@ -45,7 +45,7 @@ export const chords_real: MidiNote[] = [
     { note: 59, start: 5760, end: 7680, velocity: 90, channel: 0 },
 ];
 
-export const drums_real: MidiNote[] = [
+export const drums_real: Note[] = [
     { note: 36, start: 0, end: 60, velocity: 105, channel: 9 },
     { note: 42, start: 0, end: 60, velocity: 75, channel: 9 },
     { note: 42, start: 240, end: 300, velocity: 55, channel: 9 },
@@ -99,6 +99,7 @@ export const drums_real: MidiNote[] = [
 export const SUGGESTIONS: Record<PartId, Suggestion> = {
   bass: {
     part: "bass",
+    version: 1,
     notes: [
     { note: 45, start: 0, end: 240, velocity: 100, channel: 0 },
     { note: 57, start: 240, end: 480, velocity: 80, channel: 0 },
@@ -137,9 +138,11 @@ export const SUGGESTIONS: Record<PartId, Suggestion> = {
     confidence: 0.62,
     source_tool: "midi-gen.generate_bassline v3",
     params: { style: "octaves" },
+    status: "generated",
   },
   chords: {
     part: "chords",
+    version: 1,
     notes: [
     { note: 57, start: 0, end: 1920, velocity: 90, channel: 0 },
     { note: 60, start: 0, end: 1920, velocity: 90, channel: 0 },
@@ -158,9 +161,11 @@ export const SUGGESTIONS: Record<PartId, Suggestion> = {
     confidence: 0.55,
     source_tool: "midi-gen.generate_chord_progression v3",
     params: { voicing: "block" },
+    status: "generated",
   },
   drums: {
     part: "drums",
+    version: 1,
     notes: [
     { note: 36, start: 0, end: 60, velocity: 105, channel: 9 },
     { note: 42, start: 0, end: 60, velocity: 75, channel: 9 },
@@ -215,5 +220,6 @@ export const SUGGESTIONS: Record<PartId, Suggestion> = {
     confidence: 0.71,
     source_tool: "midi-gen.generate_drum_pattern v3",
     params: { variation: true },
+    status: "generated",
   },
 };

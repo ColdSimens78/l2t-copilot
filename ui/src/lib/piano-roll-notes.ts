@@ -9,7 +9,7 @@
  * accept, proposal §3.1).
  */
 import type { Note } from "@/components/audio-ui/piano-roll/edits";
-import type { MidiNote, Suggestion } from "@/contract/suggestion";
+import type { Note as MidiNote, Suggestion } from "@/types/contract";
 
 export const TICKS_PER_UNIT = 120; // 480 TPQ / 120 = 16-я нота
 export const UNITS_PER_BAR = 16;

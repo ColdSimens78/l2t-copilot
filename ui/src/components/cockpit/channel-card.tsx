@@ -17,7 +17,7 @@ import {
 } from "@/components/audio-ui/piano-roll";
 import { Timeline } from "@/components/audio-ui/timeline";
 import { GhostPianoRollGrid } from "@/components/cockpit/ghost-piano-roll-grid";
-import type { AcceptanceEvent, MidiNote, PartId, Suggestion } from "@/contract/suggestion";
+import type { AcceptanceEvent, Note, PartId, Suggestion } from "@/types/contract";
 import { ghostNotes, realNotes, UNITS_PER_BAR } from "@/lib/piano-roll-notes";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,7 @@ export interface ChannelCardProps {
   part: PartId;
   title: string;
   /** Реальные ноты канала, формат midi_io (тики). */
-  notes: MidiNote[];
+  notes: Note[];
   /** Предложение поверх канала (призрачный слой). */
   suggestion: Suggestion;
   /** Число тактов ролла. */
@@ -66,6 +66,7 @@ export function ChannelCard({
     onDecision({
       ts: Date.now(),
       part,
+      version: suggestion.version,
       source_tool: suggestion.source_tool,
       decision: what,
       mode: "manual",

@@ -8,7 +8,7 @@ import { useState } from "react";
 import { Pause, Play, Square } from "lucide-react";
 
 import { ChannelCard } from "@/components/cockpit/channel-card";
-import type { AcceptanceEvent } from "@/contract/suggestion";
+import type { AcceptanceEvent } from "@/types/contract";
 import { bass_real, chords_real, drums_real, SUGGESTIONS } from "@/mock/parts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
