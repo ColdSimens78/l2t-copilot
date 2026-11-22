@@ -48,3 +48,5 @@ v0.5.0 + `002-workspace-automation.patch`).
   MCP-нативность (форк дублировал бы апстрим-работу); оверлей даёт скорость
   без merge-hell. Wave 2 переразмечена: Ableton (shelved, OS-mismatch) →
   Ardour/REAPER через DawBackend (docs/dawbackend-spec.md).
+
+**ОБНОВЛЕНИЕ 2026-11-22 (ревью-тур №3): модель потребления SoundCraft эволюционирует.** Разведка №7 (docs/oss-recon-engines.md, ✅ APPROVED Папой): апстрим v0.20.1 имеет standalone headless-стек (soundcraft-cli mcp — нативный MCP на stdio, мультикорневая workspace-песочница, headless-bounce). l2t-core переключается на `soundcraft-cli mcp` (спайк Кодера в работе, bинарь пиннится в ~/bin, паттерн audio-analyzer). РЫНОК ПРОВЕРЕН: permissive DAW-сессионного движка, кроме SoundCraft и Tracktion (GPL/commercial-стена), не существует — миграция не оправдана. **T1-триггер расширен: «деградация soundcraft-cli» также активирует пересмотр** (вместе с fork-вопросом). ZCode-плагин сохраняет роль UI-интеграции ZCode-сессий. audio-analyzer-rs: апстрим мёртв 8+ мес (T1-факт) — решение Папы: остаёмся на pinned-бинарях (работают), roadmap-патч sections.rs в бэклоге.
