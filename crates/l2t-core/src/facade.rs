@@ -301,6 +301,14 @@ impl CockpitCore {
         json!({"ok": self.audio_analyzer.is_some() || self.midi_gen.is_some()})
     }
 
+    /// Превью-партии: оффлайн-рендер staging-.mid в WAV сайдкаром FluidSynth
+    /// (правило №5: ядро не синтезирует, только оркестрирует; фронт
+    /// проигрывает готовый WAV). Не входит в ipc-контракт v0.1 — внутренний
+    /// метод ядра для двухступенчатой аудиции (§10.2).
+    pub async fn render_preview(&self, mid_path: &Path) -> CoreResult<PathBuf> {
+        crate::preview::render_preview(mid_path).await
+    }
+
     /// Забрать накопленный журнал шины (источник Tauri-события bus_log).
     pub fn take_bus_log(&mut self) -> Vec<BusLog> {
         self.bus_log.drain(..).collect()
