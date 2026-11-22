@@ -1,0 +1,88 @@
+{
+ "version": "0.5.0 (ZCode plugin bridge, live capture 2026-11-22)",
+ "new_session": {
+  "name": "contract-v050",
+  "sample_rate": 44100
+ },
+ "event.tempo": {
+  "bpm": 90.0,
+  "tick": 0
+ },
+ "markers.add": {
+  "id": 1,
+  "number": 1
+ },
+ "file.import_midi": {
+  "tracks": [
+   2
+  ]
+ },
+ "bounce_mix": {
+  "bytes": 705704,
+  "lufs": -29.60540771484375,
+  "path": ".../bounce_contract_v050.wav",
+  "peak_db": -18.719945907592773,
+  "seconds": 2.6666666666666665,
+  "true_peak_db": -18.719945907592773
+ },
+ "session.inspect": {
+  "keys": [
+   "bit_depth",
+   "busses",
+   "dirty",
+   "edit_mode",
+   "frame_rate",
+   "grid",
+   "groups",
+   "length_samples",
+   "main_format",
+   "markers",
+   "meter",
+   "name",
+   "nudge",
+   "path",
+   "redo",
+   "sample_rate",
+   "selection",
+   "sources",
+   "tempo",
+   "tool",
+   "tracks",
+   "transport",
+   "undo",
+   "zoom"
+  ],
+  "tempo_shape": [
+   {
+    "bpm": 90.0,
+    "tick": 0
+   }
+  ],
+  "marker_shape": {
+   "end": 0,
+   "id": 1,
+   "kind": "Marker",
+   "name": "Key: A minor",
+   "number": 1,
+   "start": 0
+  },
+  "clip_shape_keys": [
+   "end",
+   "fade_in",
+   "fade_out",
+   "gain_db",
+   "id",
+   "length",
+   "locked",
+   "muted",
+   "name",
+   "notes",
+   "start",
+   "start_time"
+  ]
+ },
+ "edit.undo": {
+  "undone": true
+ },
+ "note": "bounce_mix v0.5.0 отдаёт ВТОРОЙ JSON-объект хвостом (written-массив) — плагин-мост; standalone v0.20.1 — одиночный объект"
+}

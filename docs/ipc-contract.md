@@ -84,3 +84,27 @@
 - Rust: типы в `crates/l2t-core/src/contract.rs` (serde).
 - TS: типы в `ui/src/types/contract.ts` (зеркало, ручная синхронизация до v1).
 - Ревью проверяет соответствие обеих сторон этому файлу.
+
+## Примечание: формы ответов движка (контракт-тест v0.5.0 ↔ v0.20.1, 2026-11-22)
+
+Golden снят живым на обеих версиях (см. `crates/l2t-core/tests/golden/`,
+тесты `contract_engine.rs`) — **формы совпали поле-в-поле** на всех
+командах DawBackend: `new_session`, `event.tempo` `{bpm, tick}`,
+`markers.add` `{id, number}`, `file.import_midi` `{tracks: [id…]}`,
+`bounce_mix` `{bytes, lufs, path, peak_db, seconds, true_peak_db}`,
+`session.inspect` (24 ключа), `edit.undo` `{undone}`. Семантика для
+реализаций:
+
+1. **`tempo` в inspect — массив темп-карты `[{bpm, tick}…]`**, не объект:
+   текущий BPM = `tempo[last].bpm` (adopt_loop/get_bus_state сверяют так).
+2. **`markers.add` kind нормализуется движком в `"Marker"`** — key-конвенция
+   живёт в имени: `Key: <тональность>` (get_bus_state парсит её оттуда).
+3. **Имя сессии при open_session = стем файла** (аргумент new_session —
+   транзиентный).
+4. **Клип-длина импорта считается по текущей темп-карте сессии** (сэмплы):
+   adopt_loop ДО import_midi, иначе длина неверна.
+5. `bounce_mix` v0.5.0-плагин-моста возвращал ВТОРОЙ JSON-объект хвостом
+   (`written`); standalone v0.20.1 — одиночный объект. Ядро парсит первый.
+6. При `engine: "down"` поля `tempo`/`key_marker` приходят `null`
+   (TS-зеркало сейчас `number`/`string` — Фронтендеру уточнить optional
+   при следующей синхронизации; Screen 0 их не рисует).
