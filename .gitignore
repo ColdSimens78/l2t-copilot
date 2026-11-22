@@ -42,3 +42,5 @@ Thumbs.db
 # ...кроме маленьких MIDI-лупов в examples (разрешаем явно)
 !examples/**/*.mid
 !examples/**/*.midi
+# ...кроме CC0-тестовых лупов в examples (FLAC: git-friendly lossless)
+!examples/**/*.flac
