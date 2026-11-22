@@ -119,6 +119,29 @@
 
 **Красные (читать можно, копировать нельзя):** `openDAW` (AGPL), `synkopa` (AGPL), `MAGDA` (GPL-3.0), `musicat`/`limusic`/`Audion` (GPL), `nuclear` (AGPL). `noteflow` — ⚫ файл лицензии отсутствует, не трогаем вовсе.
 
+---
+
+## Что пригодится Кодеру (добавлено 2026-11-22, конвейерная поддержка этапа 1)
+
+### Rust-крейты для MIDI
+
+| Крейт | Лицензия | Версия / активность | Зачем | Риск |
+|---|---|---|---|---|
+| [`midly`](https://github.com/negamartin/midly) | 🟢 **Unlicense** (public domain — ноль обязательств) | 0.5.3, 657k загрузок, последняя публикация 2023-01 | Парсинг/запись SMF в Rust: events, chunks, running status — если `core/midi_io` (сейчас Python/mido) переезжает в Rust-ядро или для валидации `.mid` на шине | Крейт стабилен и «закончен» (пуш 2024-07) — для формата-стандарта это плюс, не минус |
+| [`midir`](https://github.com/Boddlnagg/midir) | 🟢 MIT | 0.11.1, 1.23M загрузок, обновлён 2026-10 (GitHub 846★) | Realtime MIDI I/O: ALSA (Linux), WinMM, CoreMIDI, Jack, Web MIDI — для будущего «MIDI-клавиатура → запись» (v1+, не v0) | Callback-based API — мостить в async-ядро через каналы (README прямо предлагает) |
+
+Оба крейта не пересекаются с MCP-слоем (ядро = stdio-процессы и файлы); midly — кандидат в `Cargo.toml` при первом Rust-парсинге MIDI, midir — резерв v1.
+
+### Tauri WindowManager — нюансы для FL-паттерна «окно на функцию»
+
+- **Создание окон из Rust:** `WebviewWindowBuilder::new(app, "label", WebviewUrl::default()).title(...).inner_size(...)` в `setup`-closure ([window customization](https://v2.tauri.app/learn/window-customization/), URL проверен). Свойства через builder: `decorations`, `always_on_top`, `maximized`; JS-API `getCurrentWindow()` — только внутри уже созданного окна.
+- **Кверки Linux (gh issues tauri-apps/tauri):**
+  - [#12589](https://github.com/tauri-apps/tauri/issues/12589) (closed 2025-08, без фикс-комментария): открытие WebviewWindow **после закрытия** одного ломало создание окон на Linux — для динамических FL-окон обязательный ретест на спайке недели 1.
+  - [#10746](https://github.com/tauri-apps/tauri/issues/10746) (closed): фокус окна при создании сломан с v2 — флотирующие панели могут приходить без фокуса.
+  - [#11814](https://github.com/tauri-apps/tauri/issues/11814) (**open**): «show window без кражи фокуса» на Linux не поддерживается — AI Dock/всплывающие панели проектировать с учётом, что окно всегда забирает фокус.
+- **Capabilities:** все window-команды по умолчанию заблокированы — `core:window:allow-close` и прочие вносятся в `src-tauri/capabilities/default.json` явно (не выстрел в ногу при первом «кнопка не работает»).
+- **`data-tauri-drag-region`** действует только на сам элемент, не на детей — кастомный тайтлбар FL-окна размечать напрямую.
+
 ## Источники
 
 GitHub API (метаданные сняты 2026-11-22): [audio-ui](https://github.com/ouestlabs/audio-ui) · [synkopa](https://github.com/miskibin/synkopa) · [openDAW](https://github.com/andremichelle/openDAW) · [magda-core](https://github.com/Conceptual-Machines/magda-core) · [konva](https://github.com/konvajs/konva) · [react-konva](https://github.com/konvajs/react-konva) · [pixi.js](https://github.com/pixijs/pixijs) · [wavesurfer.js](https://github.com/katspaugh/wavesurfer.js) · [peaks.js](https://github.com/bbc/peaks.js) · [waveform-playlist](https://github.com/naomiaro/waveform-playlist) · [efflux-tracker](https://github.com/igorski/efflux-tracker) · [shadcn/ui](https://github.com/shadcn-ui/ui) · [radix primitives](https://github.com/radix-ui/primitives) · [tailwindcss](https://github.com/tailwindlabs/tailwindcss) · [lucide](https://github.com/lucide-icons/lucide) · [piano-trainer](https://github.com/ZaneH/piano-trainer) · [musicat](https://github.com/basharovV/musicat) · [nuclear](https://github.com/nukeop/nuclear) · [webmidi](https://github.com/djipco/webmidi) · [reactronica](https://github.com/unkleho/reactronica) · [react-piano](https://github.com/kevinsqi/react-piano) · [tauri plugins](https://github.com/tauri-apps/plugins-workspace)
