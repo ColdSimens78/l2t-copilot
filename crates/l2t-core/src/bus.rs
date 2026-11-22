@@ -68,6 +68,11 @@ impl BusServer {
         self.config.name
     }
 
+    /// Доступ к сырому сервису rmcp (для tools/list со схемами и т.п.).
+    pub fn service_raw(&self) -> &RunningService<RoleClient, ()> {
+        &self.service
+    }
+
     /// Вызвать инструмент и вернуть компактный JSON. Первый text-блок
     /// парсится как JSON (все наши серверы отвечают JSON-строкой); если
     /// парсинг не удался — отдаём `{"raw": "..."}`.

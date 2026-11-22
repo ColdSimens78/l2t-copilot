@@ -8,12 +8,20 @@
 //! bounded-ошибки текстом, сессия — источник истины (генераторы зовутся
 //! без вшивания темпа — это их контракт, ядро его не нарушает).
 
+pub mod analyzer_parse;
 pub mod bus;
 pub mod config;
+pub mod contract;
 pub mod error;
 pub mod facade;
+pub mod keys;
+pub mod notes;
 
 pub use bus::{BusServer, DEFAULT_CALL_TIMEOUT, INSPECT_TIMEOUT};
 pub use config::{resolve_audio_analyzer, resolve_midi_gen, ServerConfig};
+pub use contract::{
+    AcceptResult, BusLog, BusState, EngineState, Note, Part, SelfCheckReport, Suggestion,
+    SuggestionStatus, XRayReport,
+};
 pub use error::{CoreError, CoreResult};
-pub use facade::{CockpitCore, GENERATION_TOOLS};
+pub use facade::CockpitCore;

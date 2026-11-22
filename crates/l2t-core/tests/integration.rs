@@ -1,4 +1,4 @@
-//! Интеграционные тесты l2t-core: реальный stdio-транспорт.
+//! Интеграционные тесты l2t-core: реальный stdio-транспорт + ipc-контракт.
 //!
 //! Правило: тесты не требуют webkit/tauri и не ломаются на машине без
 //! слотов шины — мок-сервер поднимается из fixtures/, а живые серверы
@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use l2t_core::bus::BusServer;
 use l2t_core::config::{resolve_audio_analyzer, resolve_midi_gen, ServerConfig};
+use l2t_core::contract::{Part, SuggestionStatus};
 use l2t_core::error::CoreError;
-use l2t_core::facade::CockpitCore;
+use l2t_core::CockpitCore;
 use serde_json::json;
 
 fn fixture(name: &str) -> PathBuf {
@@ -20,7 +21,6 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn mock_config() -> Option<ServerConfig> {
-    // системный python3 есть почти всюду; skip если вдруг нет
     let py = which("python3")?;
     Some(ServerConfig {
         name: "mock",
@@ -51,7 +51,6 @@ async fn timeout_triggers_auto_inspect_server_alive() {
     };
     let server = BusServer::connect(cfg).await.expect("mock должен подняться");
 
-    // echo_ok работает
     let ok = server.call_json("echo_ok", args(json!({})), Duration::from_secs(5)).await.unwrap();
     assert_eq!(ok, json!({"ok": true}));
 
@@ -98,51 +97,93 @@ async fn tool_error_text_is_carried_through() {
 // ------------------------------------------------------- живой midi-gen ----
 
 #[tokio::test]
-async fn midi_gen_bassline_via_bus() {
+async fn generate_part_produces_contract_suggestion() {
     let cfg = resolve_midi_gen();
     if !cfg.command.is_file() {
         eprintln!("SKIP: midi-gen не найден ({})", cfg.command.display());
         return;
     }
-    let server = BusServer::connect(cfg).await.expect("midi-gen должен подняться");
-    let out = std::env::temp_dir().join("l2t-core-test-bass.mid");
-    let res = server
-        .call_json(
-            "generate_bassline",
-            args(json!({"bpm": 60, "key": "A minor", "output_path": out.display().to_string()})),
-            Duration::from_secs(30),
+    let broken_an = ServerConfig {
+        name: "audio-analyzer",
+        command: PathBuf::from("/nonexistent/mcp-server"),
+        args: vec![],
+        env: HashMap::new(),
+    };
+    let staging = tempfile_staging("gen");
+    let mut core = CockpitCore::connect_in(broken_an, cfg, staging.clone()).await;
+
+    // v1: basic-бас в Am — PoC-паттерн A2 E3 A3 C3 по четвертям
+    let s1 = core
+        .generate_part(
+            Part::Bass,
+            json!({"bpm": 60, "key": "A minor", "style": "basic"}),
         )
         .await
-        .expect("generate_bassline должен сработать");
-    assert_eq!(res["bpm"], json!(60));
-    assert_eq!(res["key"], json!("A minor"));
-    assert!(out.is_file(), "MIDI-файл должен существовать");
-    server.shutdown().await;
+        .expect("generate_part v1");
+    assert_eq!(s1.version, 1);
+    assert_eq!(s1.status, SuggestionStatus::Generated);
+    assert_eq!(s1.source_tool, "midi-gen.generate_bassline");
+    assert!(s1.confidence > 0.0);
+    assert_eq!(s1.notes.iter().map(|n| n.note).collect::<Vec<_>>(), vec![45, 52, 57, 48]);
+    assert_eq!(s1.notes.iter().map(|n| n.start).collect::<Vec<_>>(), vec![0, 480, 960, 1440]);
+    assert_eq!(s1.notes.iter().map(|n| n.channel).collect::<Vec<_>>(), vec![0; 4]);
+    let file1 = staging.join("bass_v1.mid");
+    assert!(file1.is_file(), "стейджинг-артефакт по контракту");
+
+    // v2: regenerate с diff-параметром — стиль меняется, версия растёт
+    let s2 = core
+        .regenerate(Part::Bass, json!({"style": "octaves"}))
+        .await
+        .expect("regenerate v2");
+    assert_eq!(s2.version, 2);
+    assert_eq!(s2.notes[0].note, 45); // октавный баунс от того же корня
+    assert_ne!(s2.notes.len(), s1.notes.len());
+    assert!(staging.join("bass_v2.mid").is_file());
+
+    // reject текущей версии → manifest + статус
+    core.reject_part(Part::Bass, 2).expect("reject");
+    assert_eq!(core.suggestion(Part::Bass).unwrap().status, SuggestionStatus::Rejected);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(staging.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest.as_array().unwrap().len(), 1);
+    assert_eq!(manifest[0]["part"], json!("bass"));
+    assert_eq!(manifest[0]["decision"], json!("rejected"));
+
+    // accept без хоста — честная bounded-ошибка, НЕ тихая заглушка
+    let err = core.accept_part(Part::Bass, 2).unwrap_err();
+    assert!(err.to_string().contains("DawBackend"));
+
+    // журнал шины накопился (для события bus_log)
+    let log = core.take_bus_log();
+    assert!(log.iter().any(|e| e.command == "generate_part" && e.status.is_ok()));
+    core.shutdown().await;
 }
 
 #[tokio::test]
-async fn midi_gen_unknown_style_is_bounded_error() {
+async fn drums_suggestion_keeps_gm_channel() {
     let cfg = resolve_midi_gen();
     if !cfg.command.is_file() {
         eprintln!("SKIP: midi-gen не найден");
         return;
     }
-    let server = BusServer::connect(cfg).await.unwrap();
-    let out = std::env::temp_dir().join("l2t-core-test-bad.mid");
-    let err = server
-        .call_json(
-            "generate_bassline",
-            args(json!({"bpm": 60, "key": "A minor", "style": "jazzberry",
-                        "output_path": out.display().to_string()})),
-            Duration::from_secs(30),
+    let broken_an = ServerConfig {
+        name: "audio-analyzer",
+        command: PathBuf::from("/nonexistent/mcp-server"),
+        args: vec![],
+        env: HashMap::new(),
+    };
+    let mut core = CockpitCore::connect_in(broken_an, cfg, tempfile_staging("drums")).await;
+    let s = core
+        .generate_part(
+            Part::Drums,
+            json!({"bpm": 90, "bars": 4, "variation": true}),
         )
         .await
-        .expect_err("unknown style — isError");
-    match &err {
-        CoreError::Tool { message, .. } => assert!(message.contains("jazzberry")),
-        other => panic!("ожидался Tool, получили {other:?}"),
-    }
-    server.shutdown().await;
+        .expect("generate_part drums");
+    // GM drum channel 10 (0-indexed 9) обязан сохраниться в notes-контракте
+    assert!(!s.notes.is_empty());
+    assert!(s.notes.iter().all(|n| n.channel == 9));
+    core.shutdown().await;
 }
 
 // -------------------------------------------------- живой audio-analyzer ----
@@ -161,84 +202,66 @@ fn write_sine_wav(path: &Path) {
     f.write_all(b"RIFF").unwrap();
     f.write_all(&(36 + data.len() as u32).to_le_bytes()).unwrap();
     f.write_all(b"WAVEfmt ").unwrap();
-    f.write_all(&16u32.to_le_bytes()).unwrap();       // fmt chunk size
-    f.write_all(&1u16.to_le_bytes()).unwrap();        // PCM
-    f.write_all(&1u16.to_le_bytes()).unwrap();        // mono
+    f.write_all(&16u32.to_le_bytes()).unwrap();
+    f.write_all(&1u16.to_le_bytes()).unwrap();
+    f.write_all(&1u16.to_le_bytes()).unwrap();
     f.write_all(&sr.to_le_bytes()).unwrap();
-    f.write_all(&(sr * 2).to_le_bytes()).unwrap();    // byte rate
-    f.write_all(&2u16.to_le_bytes()).unwrap();        // block align
-    f.write_all(&16u16.to_le_bytes()).unwrap();       // bits
+    f.write_all(&(sr * 2).to_le_bytes()).unwrap();
+    f.write_all(&2u16.to_le_bytes()).unwrap();
+    f.write_all(&16u16.to_le_bytes()).unwrap();
     f.write_all(b"data").unwrap();
     f.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
     f.write_all(&data).unwrap();
 }
 
+fn tempfile_staging(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("l2t-core-it-{tag}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
 #[tokio::test]
-async fn analyze_loop_composite_on_sine() {
+async fn analyze_loop_returns_xray_report_and_self_check() {
     let an_cfg = resolve_audio_analyzer();
     if !an_cfg.command.is_file() {
         eprintln!("SKIP: audio-analyzer не найден ({})", an_cfg.command.display());
         return;
     }
-    // midi-gen слот намеренно битый: analyze_loop не должен от него зависеть
     let broken_midi = ServerConfig {
         name: "midi-gen",
         command: PathBuf::from("/nonexistent/l2t-midi-gen"),
         args: vec![],
         env: HashMap::new(),
     };
-    let core = CockpitCore::connect_with(an_cfg, broken_midi).await;
+    let mut core = CockpitCore::connect_in(an_cfg, broken_midi, tempfile_staging("xray")).await;
 
     let wav = std::env::temp_dir().join("l2t-core-test-sine.wav");
     write_sine_wav(&wav);
-    let xray = core.analyze_loop(&wav).await.expect("Loop X-Ray на синусе должен работать");
-    for key in ["path", "info", "spectral", "harmonic", "rhythm"] {
-        assert!(xray.get(key).is_some(), "в X-Ray должно быть поле {key}");
-    }
-    // наш самописный WAV декодируется как 44100 mono
-    let info_txt = serde_json::to_string(&xray["info"]).unwrap();
-    assert!(info_txt.contains("44100"), "sample_rate в info: {info_txt}");
+    let xray = core.analyze_loop(&wav).await.expect("Loop X-Ray на синусе");
+    // значения сверены с живым дампом на этом же файле
+    assert_eq!(xray.key, "A minor");
+    assert!((xray.key_confidence - 0.682).abs() < 0.01);
+    assert!((xray.bpm - 120.0).abs() < 0.01);
+    assert!((xray.lufs - -9.5).abs() < 0.1);
+    assert!((xray.true_peak - -8.7).abs() < 0.1);
+    assert!(xray.bands.contains_key("low_mid"));
+    assert!(xray.onset_density.is_some());
 
-    // слот midi-gen не подключён, но ядро живо; bus_state это отражает
+    // Self-Check: баунс == тот же файл → ok (relative-key и ×2 учтены)
+    let check = core.run_self_check(&wav).await.expect("Self-Check");
+    assert!(check.key_match);
+    assert!(check.tempo_match);
+    assert_eq!(check.verdict, "ok");
+    assert!((check.lufs_delta - 0.0).abs() < 0.05);
+
+    // контрактный get_bus_state: хоста нет — engine down, поля пустые
     let state = core.get_bus_state().await;
-    let servers = state["servers"].as_array().unwrap();
-    let midi = servers.iter().find(|s| s["slot"] == json!("midi-gen")).unwrap();
-    assert_eq!(midi["alive"], json!(false));
-    core.shutdown().await;
-}
+    assert_eq!(serde_json::to_value(&state).unwrap()["engine"], json!("down"));
 
-#[tokio::test]
-async fn generate_part_whitelist_and_flow() {
-    let cfg = resolve_midi_gen();
-    if !cfg.command.is_file() {
-        eprintln!("SKIP: midi-gen не найден");
-        return;
-    }
-    let broken_an = ServerConfig {
-        name: "audio-analyzer",
-        command: PathBuf::from("/nonexistent/mcp-server"),
-        args: vec![],
-        env: HashMap::new(),
-    };
-    let core = CockpitCore::connect_with(broken_an, cfg).await;
-
-    // whitelist: неизвестный генератор — bounded-ошибка без похода на шину
-    let err = core.generate_part("generate_synth_pad", json!({})).await.unwrap_err();
-    match &err {
-        CoreError::Tool { message, .. } => assert!(message.contains("generate_bassline")),
-        other => panic!("ожидался Tool-whitelist, получили {other:?}"),
-    }
-
-    let out = std::env::temp_dir().join("l2t-core-test-drums.mid");
-    let res = core
-        .generate_part(
-            "generate_drum_pattern",
-            json!({"bpm": 90, "output_path": out.display().to_string(),
-                   "bars": 4, "variation": true}),
-        )
-        .await
-        .expect("generate_drum_pattern через фасад");
-    assert_eq!(res["bpm"], json!(90));
-    assert_eq!(res["hits"], json!(49)); // 4 такта: 48 базовых + филл (данные B.0)
+    // а слоты шины видит и внутренний снимок bus_slots
+    let slots = core.bus_slots().await;
+    let an = slots["servers"].as_array().unwrap().iter()
+        .find(|s| s["slot"] == json!("audio-analyzer")).unwrap();
+    assert_eq!(an["alive"], json!(true));
     core.shutdown().await;
 }
