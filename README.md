@@ -171,7 +171,7 @@ soundcraft-cli --version                             # 0.20.1
 
 - ✅ **Этап 1** — ядро (l2t-core: bus/facade/preview, 9 cargo-тестов), WebKitGTK-спайк **GO**, UI-скаффолд + ghost notes (моки), CI
 - ✅ **Этап 2** — production connect: engine slot, adopt_loop, настоящий get_bus_state, staging manifest, accept через движок, e2e из webview
-- 🔨 **Этап 3** — экраны S0–S7 на реальном IPC, SoundCraft-клиент (adopt_loop/get_bus_state), панель Acceptance Rate, Telegram-доставка (волна 1)
+- 🔨 **Этап 3** — экраны S0–S7 на реальном IPC, SoundCraft-клиент (adopt_loop/get_bus_state), панель Acceptance Rate, экспорт трека из кокпита
 - ⏳ **Этап 4** — «Мозг»: автопилот через qwen_bridge, стоп-кран, лимиты
 
 ## Лицензия
