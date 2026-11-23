@@ -5,7 +5,7 @@
 //! (stdio). Серверы шины на WebSocket не переводятся. События (bus_log /
 //! suggestion_updated / host_status) эмитятся после каждого вызова.
 //!
-//! Спайк-харнесс spike_report (Фронтендер) сохранён — WebKitGTK-спайк
+//! Спайк-харнесс spike_report (UI-модуль) сохранён — WebKitGTK-спайк
 //! продолжается параллельно основной работе.
 
 use std::io::Write;
@@ -219,7 +219,7 @@ async fn bounce(
 static E2E_DONE: AtomicBool = AtomicBool::new(false);
 
 fn e2e_js() -> Option<String> {
-    // CC0-лупы Разведчика; берём первый найденный FLAC
+    // CC0-лупы OSS-разведки; берём первый найденный FLAC
     let examples = PathBuf::from("/home/ilmir/l2t-copilot/examples");
     let loop_wav = std::fs::read_dir(&examples)
         .ok()?

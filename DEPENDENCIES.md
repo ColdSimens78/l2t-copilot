@@ -1,7 +1,7 @@
 # DEPENDENCIES.md — лицензионный манифест L2T Copilot
 
 **Цель:** у MIT-репо с планами монетизации всегда под рукой чистый ответ «что мы тащим и что нам за это будет».
-**Дата аудита:** 2026-11-22 (Разведчик, тема №5 конвейера). **Методика:** лицензии сняты не по памяти — Python: метаданные **установленных** пакетов (`importlib.metadata`, repo `.venv`); Rust: crates.io API для **всех 118 крейтов из `crates/l2t-core/Cargo.lock`** (поле `license` версии; JSON-дамп проверки — фиксируется при каждом обновлении); JS: GitHub/npm-метаданные из разведки №1 (`docs/oss-recon-ui.md`).
+**Дата аудита:** 2026-11-22 (OSS-разведка, тема №5 конвейера). **Методика:** лицензии сняты не по памяти — Python: метаданные **установленных** пакетов (`importlib.metadata`, repo `.venv`); Rust: crates.io API для **всех 118 крейтов из `crates/l2t-core/Cargo.lock`** (поле `license` версии; JSON-дамп проверки — фиксируется при каждом обновлении); JS: GitHub/npm-метаданные из разведки №1 (`docs/oss-recon-ui.md`).
 
 **Правило обязательств (сводное):** MIT/BSD/ISC/Apache-2.0/MIT-0/Zlib/Unlicense/CC0 — включаем текст лицензии + копирайт в `THIRD_PARTY_NOTICES` при дистрибуции (PyPI/sdist этого достаточно автоматически; для бандлов бинарников — вручную). Apache-2.0 дополнительно: NOTICE-файл + пометка изменений при модификации. MPL-2.0 — file-level copyleft: наши модификации MPL-файлов открываются, использование как есть — просто notice. GPL/AGPL/LGPL-только — **запрещены как зависимости** (внешние процессы — ок; см. docs/oss-recon-soundfonts.md).
 
@@ -60,7 +60,7 @@
 
 При бандле нативного бинарника в release-артефакт: приложить генерируемый `cargo-license`/`about`-дамп в `THIRD_PARTY_NOTICES` (план — автоматизировать на этапе packaging). Рекомендация на этап packaging: `cargo-deny` в CI (запрет GPL/AGPL-появления в будущем дереве — дифф этого манифеста).
 
-## 3. JS/UI (планируемые — после copy-in Фронтендером заменить фактом `ui/package.json`)
+## 3. JS/UI (планируемые — после copy-in в ui/ заменить фактом `ui/package.json`)
 
 | Пакет | Лицензия | Статус | Источник проверки |
 |---|---|---|---|
@@ -69,7 +69,7 @@
 | `tailwindcss` | MIT | планируется | docs/oss-recon-ui.md №4 |
 | `lucide` | ISC (LICENSE-файл проверен вручную — API давал NOASSERTION) | планируется | docs/oss-recon-ui.md №4 |
 | `wavesurfer.js` | BSD-3-Clause | планируется (Loop X-Ray рендер) | docs/oss-recon-ui.md №3 |
-| `tauri` v2 core + `plugins-workspace` (shell) | MIT/Apache-2.0 | планируется (Rust-ядро Кодера уже на rmcp; Tauri-скаффолд следующий) | docs/oss-recon-ui.md №2 |
+| `tauri` v2 core + `plugins-workspace` (shell) | MIT/Apache-2.0 | планируется (Rust-ядро уже на rmcp; Tauri-скаффолд следующий) | docs/oss-recon-ui.md №2 |
 | `konva`/`react-konva` | MIT (LICENSE-файл проверен) | резерв перфа | docs/oss-recon-ui.md №3 |
 | `pixijs` | MIT | резерв (отсечён до профилирования) | docs/oss-recon-ui.md №3 |
 | `react`, `react-dom`, `vite`, `typescript` | MIT/MIT/MIT/Apache-2.0 | типовые | подтвердить фактом при скаффолде |

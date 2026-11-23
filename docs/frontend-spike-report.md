@@ -1,6 +1,6 @@
 # WebKitGTK-спайк — отчёт недели 1 (§10.2)
 
-**Автор:** Фронтендер (дочерняя сессия) · **Дата:** 2026-11-22
+**Автор:** L2T team · **Дата:** 2026-11-22
 **Задача:** чек-лист §10.2 proposal v0.3 — шрифты, HTML-audio (gapless-луп), drag-and-drop из файлового менеджера, always-on-top, потребление памяти. Выход: go/no-go по WebKitGTK + вводная для решения по превью-рендеру (§11 в.3).
 **Платформа:** Debian 13.7, KDE Plasma X11 (KWin), WebKitGTK **2.54.0**, GTK 3.24.49, Tauri **2.9.x** (CLI 2.9.6, tao 0.37.3, wry/webkit2gtk-rs 2.0.2), Rust 1.100.0, Node 26.13.1, pnpm 10.34.9.
 **Метод:** Tauri-скаффолд (`ui/src-tauri/`, окно грузит `public/spike.html` с vite-dev-сервера) + харнесс: JS-страница вызывает команду ядра `spike_report`, Rust печатает `SPIKE key=value` в stdout — программные доказательства в логе процесса. Три прогона по 15–20 с.
@@ -31,7 +31,7 @@
 
 ## 3. Решение по превью-рендеру (§11 в.3, вводная)
 
-Спайк подтверждает: **сайдкар GM-синт первым** (решение Папы из собрания) полностью совместимо с платформой — `<audio>` в WebKitGTK играет WAV-файлы, автоплей-ограничение совпадает с UX продукта (старт по кнопке). Следующий шаг этапа 1 — Tauri-обёртка кокпита (окно грузит React-приложение вместо spike-страницы; `tauri.conf.json` уже указывает `devUrl` на vite :5199 и `frontendDist ../dist`).
+Спайк подтверждает: **сайдкар GM-синт первым** (решение мейнтейнера из собрания) полностью совместимо с платформой — `<audio>` в WebKitGTK играет WAV-файлы, автоплей-ограничение совпадает с UX продукта (старт по кнопке). Следующий шаг этапа 1 — Tauri-обёртка кокпита (окно грузит React-приложение вместо spike-страницы; `tauri.conf.json` уже указывает `devUrl` на vite :5199 и `frontendDist ../dist`).
 
 ## 4. Как воспроизвести
 
@@ -47,9 +47,9 @@ cd ui/src-tauri && cargo build && DISPLAY=:0 ./target/debug/app
 
 Авторизован скоуп: `git add ui/ pnpm-workspace.yaml docs/frontend-spike-report.md` — сообщение `feat(ui): cockpit scaffold + ghost notes (mock IPC)`. `pnpm-workspace.yaml` включён явно: это часть моего скаффолда (п.2 задачи, workspace-определение, без него `pnpm install` в ui/ не работает в монорепо), не чужой файл. `node_modules`/`dist`/`target` покрыты gitignore.
 
-## 6. Дополнение: ретест кверков Разведчика (прогон 6–9, тот же день)
+## 6. Дополнение: ретест кверков OSS-разведки (прогон 6–9, тот же день)
 
-Проверки после вердикта Папы на кверки Разведчика. Харнесс расширен (`ui/public/spike.html` §5, permission'ы `core:webview:allow-create-webview-window` / `allow-webview-close` / `core:window:allow-close` добавлены явно).
+Проверки после вердикта мейнтейнера на кверки OSS-разведки. Харнесс расширен (`ui/public/spike.html` §5, permission'ы `core:webview:allow-create-webview-window` / `allow-webview-close` / `core:window:allow-close` добавлены явно).
 
 | Кверк | Вердикт | Доказательство |
 |---|---|---|
@@ -59,9 +59,9 @@ cd ui/src-tauri && cargo build && DISPLAY=:0 ./target/debug/app
 | **#11814 — фокус-кража** | 🟡 принято как дизайн-ограничение (без автоматического теста) | API-скрытие окна не тестировалось программно; правило для AI Dock/флотирующих панелей — не требовать no-focus (согласовано в спеке v0.4 §4.5). |
 | **HTML-audio gapless-луп — повтор прогона** | ✅ улучшение: луп **стартовал и обёртывался без остановки** | `SPIKE audio_play=started`, `audio_wraps=1`, `audio_stalls=0` (прогон 4/6/8/9 стабильно; в прогоне 3 был AbortError из-за гонки паузы с неуспевшим стартовать play — убрано автосоуллуп-тестом). Слуховой тест шва остаётся за владельцем. |
 
-Методологическая заметка: сборка спайка делается из **изолированной копии** src-tauri (commit-версия Cargo.toml/lib.rs), если рабочий `l2t-core` Кодера в момент сборки не компилируется — интеграция Tauri↔l2t-core в работе (незакоммичено), спайку ядро не нужно.
+Методологическая заметка: сборка спайка делается из **изолированной копии** src-tauri (commit-версия Cargo.toml/lib.rs), если рабочий `l2t-core` ядра в момент сборки не компилируется — интеграция Tauri↔l2t-core в работе (незакоммичено), спайку ядро не нужно.
 
-## 7. Окна на десктопе владельца (манифест по запросу Папы)
+## 7. Окна на десктопе (манифест процессов разработки)
 
 Какие окна открывают мои процессы и когда — чтобы дропзоны/мерцание не были сюрпризом:
 
@@ -72,7 +72,7 @@ cd ui/src-tauri && cargo build && DISPLAY=:0 ./target/debug/app
 
 Политика (принято, чтобы не мерцать на десктопе владельца):
 1. **Не более одного GUI-прогона за батч команд**, между прогонами пауза (сборка/правки — естественный зазор ≥10 с).
-2. Повторные GUI-тесты — только по новой задаче Папы/владельца, не в цикле.
+2. Повторные GUI-тесты — только по новой задаче, не в цикле.
 3. Child-окна порождаются только тестом пересоздания; после правки `?child`-guard'а дети не грузят харнесс повторно (рекурсия устранена).
 4. В браузерных проверках (vite) окно не открывается вовсе — используется встроенная панель ZCode, десктоп не затрагивается.
 5. Dev-сервер (vite :5199) после фазы погашен; перезапуск — только на время активной работы, по завершении гасится.
@@ -81,6 +81,6 @@ cd ui/src-tauri && cargo build && DISPLAY=:0 ./target/debug/app
 
 ## 8. Обновлённые коммиты (фаза A+, тот же день)
 
-1. `feat(ui): mirror ipc-contract v0.2 in TS types` — `ui/src/types/contract.ts` (+4 типа v0.2: AdoptLoop, DawRender, previewWavPath, BusState.session_name; AnalyzeLoopInput.copy_into_workspace) + перевод импортов + version/status в моках; удалён мой первый черновик `ui/src/contract/suggestion.ts`. Коммит **без** чужих незакоммиченных файлов (Cargo.toml/Cargo.lock/lib.rs/tests Кодера не тронуты — явные пути).
+1. `feat(ui): mirror ipc-contract v0.2 in TS types` — `ui/src/types/contract.ts` (+4 типа v0.2: AdoptLoop, DawRender, previewWavPath, BusState.session_name; AnalyzeLoopInput.copy_into_workspace) + перевод импортов + version/status в моках; удалён мой первый черновик `ui/src/contract/suggestion.ts`. Коммит **без** чужих незакоммиченных файлов (Cargo.toml/Cargo.lock/lib.rs/tests ядра не тронуты — явные пути).
 2. `test(ui): spike retest #12589 window-recreation + audio loop evidence` — `ui/public/spike.html`, `ui/src-tauri/capabilities/default.json`, этот отчёт.
 

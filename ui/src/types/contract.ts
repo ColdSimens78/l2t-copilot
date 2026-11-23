@@ -3,7 +3,7 @@
  * Единственное место типов между React-фронтом и Rust-ядром; Rust-сторона —
  * crates/l2t-core/src/contract.rs (serde). Ручная синхронизация до v1:
  * расхождение сторон = баг. Изменения схемы — только bump версии контракта
- * + строка в «ПРЕДЛОЖЕНИЯ ДЕТЕЙ» + согласие Папы.
+ * + строка в «ПРЕДЛОЖЕНИЯ ДЕТЕЙ» + согласие L2T team.
  *
  * v0.2 (вердикты C1–C6): + adopt_loop (C1), конвенция превью-WAV (C2,
  * константа PREVIEW_WAV), analyze_loop.copy_into_workspace (C5),
@@ -168,8 +168,8 @@ export interface HostStatusEvent {
 /**
  * Запись локального manifest-лога AI Dock (мок). Ядро пишет в
  * staging/manifest.json минимальную запись {part, version, decision, ts}
- * (Кодер, 49df4a8); витринные поля mode/source_tool/params — из расширенного
- * предложения Исследователя (§5.3), reconciliation — за Папой. После
+ * (ядро, 49df4a8); витринные поля mode/source_tool/params — из расширенного
+ * предложения спеки (§5.3), reconciliation — за мейнтейнером. После
  * интеграции заменяется чтением manifest ядра.
  */
 export interface AcceptanceEvent {

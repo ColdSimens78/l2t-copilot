@@ -32,7 +32,7 @@ mcp = FastMCP("midi-gen")
 def _bounded(fn):
     """На SDK 2.x произвольное исключение теряет текст isError (доносится только
     ToolError) — оборачиваем ValueError/OSError в ToolError, чтобы агент всегда
-    видел причину (урок Кодера, qwen_bridge)."""
+    видел причину (урок ядра, qwen_bridge)."""
     if ToolError is None:
         return fn
     @functools.wraps(fn)

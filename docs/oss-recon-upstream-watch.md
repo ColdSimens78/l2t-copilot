@@ -1,7 +1,7 @@
 # OSS-разведка №4: апстрим-патруль SoundCraft + audio-analyzer-rs
 
-**Автор:** Разведчик · **Дата:** 2026-11-22 · **Для:** Папа (ревью) · **Тема:** статусы наших issue, активность апстрима от overlay-базы acb08ff, ранний чек T1-триггера DECISION.md
-**Методика:** GitHub API в день отчёта (gh CLI, аккаунт ColdSimens78); факты, выводы — за Папой (п. ТЗ).
+**Автор:** OSS-разведка · **Дата:** 2026-11-22 · **Для:** мейнтейнер (ревью) · **Тема:** статусы наших issue, активность апстрима от overlay-базы acb08ff, ранний чек T1-триггера DECISION.md
+**Методика:** GitHub API в день отчёта (gh CLI, аккаунт ColdSimens78); факты, выводы — за мейнтейнером (п. ТЗ).
 
 ---
 
@@ -13,7 +13,7 @@
 | [storytold/soundcraft#1701](https://github.com/storytold/soundcraft/issues/1701) — key-signature API (`event.key_signature`) | OPEN | **Триаж ботом через ~2 мин**: лейблы `priority: low`, `automation`, `backlog` | нет |
 | [storytold/soundcraft#1702](https://github.com/storytold/soundcraft/issues/1702) — import-tempo overwrite | OPEN | **Триаж ботом через ~2 мин**: лейбл `priority: medium` + автоматическая ссылка: «Possibly related: **#890** and **#911**» | 1 (бот ticket-craft) |
 
-**Контекст связанных (бот подсказал — проверено):** [#890](https://github.com/storytold/soundcraft/issues/890) «[Audit] SMF tempo and track floods» — CLOSED (labels: multiple issues, priority: medium, performance, security); [#911](https://github.com/storytold/soundcraft/issues/911) «[Audit] A failed web MIDI import is half-applied with no undo step» — CLOSED (priority: low, file-compat). Вывод-факт: SMF/темпо-тематика уже проходила у них аудит (#890), и поведение #1702, возможно, — следствие того фикса (намеренное «принять tempo файла»), а не oversight. Для Папы: при разговоре про «opt-in half» (#1702) полезно сослаться на #890 как прецедент их подхода.
+**Контекст связанных (бот подсказал — проверено):** [#890](https://github.com/storytold/soundcraft/issues/890) «[Audit] SMF tempo and track floods» — CLOSED (labels: multiple issues, priority: medium, performance, security); [#911](https://github.com/storytold/soundcraft/issues/911) «[Audit] A failed web MIDI import is half-applied with no undo step» — CLOSED (priority: low, file-compat). Вывод-факт: SMF/темпо-тематика уже проходила у них аудит (#890), и поведение #1702, возможно, — следствие того фикса (намеренное «принять tempo файла»), а не oversight. Для L2T team: при разговоре про «opt-in half» (#1702) полезно сослаться на #890 как прецедент их подхода.
 
 **Что это значит фактами:** SoundCraft реагирует на issue триажем в минуты (бот-инфраструктура есть), но человеческих ответов на наши два issue пока нет; #1701 отложен в backlog+low. audio-analyzer-rs — ноль реакции (репо тихо, см. ниже).
 
@@ -50,11 +50,11 @@
 
 Факт-приложение: наш плагин-контракт с SoundCraft — overlay (upstream + патч-файлы), не fork (DECISION.md); триггеры T2/T3 не проверялись (это вопрос кода/ревью, не разведки).
 
-## (г) Флаги для Папы — что требует решения
+## (г) Флаги для L2T team — что требует решения
 
 1. **audio-analyzer-rs — T1-факт**: апстрим мёртв 8+ мес. Решения на выбор: (a) остаться на зафиксированных бинарниках + обходные пути (статус-кво, ничего не делать); (b) заложить в roadmap «свой патч sections.rs» (наш анализатор-модуль) — при этом вопрос лицензии LGPL/MIT самого крейта не возникает: мы НЕ линкуем, мы вызываем бинарник; (c) при появлении другого MCP-анализатора — пересмотреть слот «Анализ». Требует решения в PRD/ROADMAP — у нас висит «upstream issue #3 не ответят» как факт.
 2. **Rebase-вопрос overlay v0.5.0 → v0.20.1**: 1377 коммитов/15 версий разрыва; MCP-framing (#1656, делегация в craft-mcp-server) и удаление crates/audio-io (#1506) — структурные изменения, затрагивающие наш патч `002-workspace-automation.patch`. Не форс-мажор (плагин на v0.5.0 работает), но чем дольше ждём, тем дороже ребаз. Предмет решения: окно ребаза (например, после стабилизации этапа 1).
-3. **#1702-стратегия**: их триаж (medium + ссылка на закрытый SMF-аудит #890) намекает, что поведение может считаться intended. Наш «opt-in half»-аргумент (PRD: Adopt Loop Settings) стоит оформить как паттерн-запрос (PR с флагом), а не только issue-обсуждение — решение о PR за Папой.
+3. **#1702-стратегия**: их триаж (medium + ссылка на закрытый SMF-аудит #890) намекает, что поведение может считаться intended. Наш «opt-in half»-аргумент (PRD: Adopt Loop Settings) стоит оформить как паттерн-запрос (PR с флагом), а не только issue-обсуждение — решение о PR за мейнтейнером.
 4. **#1701 low+backlog**: если key-signature нужен для Self-Check-интеграции раньше их backlog — запасной план уже есть (named marker через `markers.add`, проверено в PoC 2); менять ничего не надо, просто не ждать.
 5. **craft-mcp-server непубличен** (не нашёлся поиском GitHub): если наш будущий DawBackend-клиент захочет переиспользовать их framing-крейт, доступность под вопросом — проверить при первом ребазе (crates.io/приватный registry).
 

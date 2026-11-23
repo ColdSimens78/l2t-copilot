@@ -48,7 +48,7 @@ export interface CockpitApi {
 
 // ─── Переключение адаптеров: ОДНА строка ──────────────────────────────────
 // MOCK (v0, весь UI кликабелен на симуляции ядра) ↔ TAURI (после вживления
-// ядра Кодером — без правок экранов; см. tauri-adapter.ts).
+// ядра ядром — без правок экранов; см. tauri-adapter.ts).
 import { mockAdapter } from "@/ipc/mock-adapter";
 import { tauriAdapter } from "@/ipc/tauri-adapter";
 // tauriAdapter доступен для будущей проверки типов:

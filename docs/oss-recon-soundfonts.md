@@ -1,6 +1,6 @@
 # OSS-разведка №2: превью-рендер для стейджинга (сайдкар GM-синт)
 
-**Автор:** Разведчик · **Дата:** 2026-11-22 · **Для:** Папа (ревью) · **Тема:** proposal §10.2 вариант (а) — `.mid → .wav` для быстрых итераций прослушивания
+**Автор:** OSS-разведка · **Дата:** 2026-11-22 · **Для:** мейнтейнер (ревью) · **Тема:** proposal §10.2 вариант (а) — `.mid → .wav` для быстрых итераций прослушивания
 **Методика:** лицензии сняты с фактических файлов (Debian copyright-файлы извлечены из .deb, LICENSE.txt из апстрим-репо), метрики GitHub/crates.io API 2026-11-22. apt-факты — с локальной машины (Debian 13 trixie).
 
 ## TL;DR — рекомендация
@@ -23,7 +23,7 @@ fluidsynth -ni -F /tmp/preview.wav -r 44100 -g 0.4 "$SF" input.mid
 | Лицензия | 🟢 **LGPL-2.1+** (Debian copyright: `License: LGPL-2.1+`) | извлечён из `fluidsynth_2.4.4+dfsg-1+deb13u3_amd64.deb` |
 | В Debian trixie | **2.4.4+dfsg-1+deb13u3** (бинарник 30 KB + `libfluidsynth3`; зависимости: glib, pipewire, sdl2) | `apt-cache show fluidsynth` |
 | Апстрим | [FluidSynth/fluidsynth](https://github.com/FluidSynth/fluidsynth), **v2.6.2** (2026-11-01), 2560★, push 2026-11-22 — живой | GitHub API |
-| CLI-рендер | `fluidsynth -ni -F out.wav [-r 44100] [-g 0.4] [опции] sf2/sf3 mid` — порядок: сначала soundfont, потом MIDI; `-ni` = без интерактивной оболочки, выход после рендера | апстрим-док/Папа (совпадает) |
+| CLI-рендер | `fluidsynth -ni -F out.wav [-r 44100] [-g 0.4] [опции] sf2/sf3 mid` — порядок: сначала soundfont, потом MIDI; `-ni` = без интерактивной оболочки, выход после рендера | апстрим-док + локальная проверка (совпадает) |
 | Драйверы аудио | pipewire/sdl2/pulse — для офлайн-рендера не нужны (`-F` обходит аудио-девайс) | Debian Depends |
 | Python-обёртки | pyfluidsynth и форки (255★) — **не рекомендую**: сайдкар = CLI-процесс, ctypes-слой лишний | GitHub search |
 | Rust-обёртки | community-биндинги без активного мейнтейнера — **не нужны** по той же причине (и правило: контракт шины = файлы/MCP, не FFI) | GitHub search |
