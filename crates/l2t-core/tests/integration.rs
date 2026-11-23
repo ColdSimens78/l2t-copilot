@@ -325,7 +325,7 @@ async fn full_pipeline_on_ratified_engine() {
     // adopt_loop: BPM+key маркер в сессию (критерий: {tempo, marker})
     let adopt = core.adopt_loop(90.0, "A minor", "examples/loop.wav").await.expect("adopt_loop");
     assert_eq!(adopt.tempo, 90.0);
-    assert_eq!(adopt.marker_name, "Key: A minor");
+    assert_eq!(adopt.marker, "Key: A minor");
 
     // настоящий get_bus_state из движка (DAW-сессия, не слот-снимок)
     let state = core.get_bus_state().await;
@@ -368,4 +368,79 @@ async fn full_pipeline_on_ratified_engine() {
     let check = core.run_self_check(&bounce).await.expect("self check");
     assert_eq!(check.verdict, "ok"); // тот же файл — тривиально ok
     core.shutdown().await;
+}
+
+
+/// **Рабочая сессия движка** (зазор №1, ратифицировано): create→tempo→
+/// import→автосейв→reopen в НОВОМ движке→inspect показывает всё; идемпотентный
+/// accept; сбой save на невозможном пути — bounded-ошибка.
+#[tokio::test]
+async fn working_session_lifecycle_and_persistence() {
+    let an_cfg = resolve_audio_analyzer();
+    let mg_cfg = resolve_midi_gen();
+
+    let ws = std::env::temp_dir().join("l2t-lifecycle-ws");
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(&ws).unwrap();
+    // партия внутри roots движка
+    std::fs::copy(
+        "/home/ilmir/.zcode/workspace/24b4fa4d-9864-4ddb-ae9c-49a5325fd9bf/bass_am90.mid",
+        ws.join("bass_am90.mid"),
+    )
+    .unwrap();
+    let engine_cfg = ServerConfig {
+        name: "soundcraft",
+        command: resolve_soundcraft().command,
+        args: vec![
+            "mcp".into(), "--automation-read-root".into(), ws.display().to_string(),
+            "--automation-write-root".into(), ws.display().to_string(),
+        ],
+        env: HashMap::new(),
+    };
+
+    let session = ws.join("cockpit.scraft");
+    let staging = ws.join("staging");
+    let mut core = CockpitCore::connect_in(an_cfg.clone(), mg_cfg.clone(), staging.clone()).await;
+    core.attach_engine(engine_cfg.clone()).await.expect("движок поднялся");
+
+    // 1) сессии нет → создаётся и сразу сохраняется
+    core.session_open_or_create(&session).await.expect("create+save");
+    assert!(session.is_file(), "файл сессии существует с первого запуска");
+    assert_eq!(core.session_path(), Some(session.as_path()));
+
+    // 2) adopt + accept: автосейв пишет изменения в файл
+    core.adopt_loop(90.0, "A minor", "lifecycle-test").await.expect("adopt");
+    let s = core
+        .generate_part(Part::Bass, json!({"bpm": 90, "key": "A minor"}))
+        .await
+        .expect("generate");
+    let acc = core.accept_part(Part::Bass, s.version).await.expect("accept→import");
+    assert!(!acc.imported_tracks.is_empty());
+
+    // 3) идемпотентность: повторный Accept той же версии — bounded-ошибка
+    let err = core.accept_part(Part::Bass, s.version).await.unwrap_err();
+    assert!(err.to_string().contains("уже принята"), "got: {err}");
+
+    // 4) сбой save на невозможном пути — bounded (каталог вместо файла)
+    let blocked = ws.join("blocked");
+    std::fs::create_dir_all(&blocked).unwrap();
+    let err = core.session_open_or_create(&blocked).await.unwrap_err();
+    assert!(!err.to_string().is_empty());
+    // session_path мог перезаписаться неудачным вызовом? — нет: ошибка до присвоения
+    assert_eq!(core.session_path(), Some(session.as_path()));
+    core.shutdown().await;
+
+    // 5) НОВЫЙ движок открывает СОХРАНЁННУЮ сессию — всё на месте
+    let mut core2 = CockpitCore::connect_in(an_cfg, mg_cfg, ws.join("staging")).await;
+    core2.attach_engine(engine_cfg).await.expect("второй движок");
+    core2.session_open_or_create(&session).await.expect("reopen");
+    let state = core2.get_bus_state().await;
+    let sv = serde_json::to_value(&state).unwrap();
+    assert_eq!(sv["engine"], json!("up"));
+    assert_eq!(sv["tempo"], json!(90.0), "tempo пережил reopen");
+    assert_eq!(sv["key_marker"], json!("A minor"), "key-маркер пережил reopen");
+    assert_eq!(sv["session_name"], json!("cockpit"));
+    let tracks = sv["tracks"].as_array().unwrap();
+    assert!(tracks.iter().any(|t| t["kind"] == json!("instrument")), "партия в сессии: {sv}");
+    core2.shutdown().await;
 }

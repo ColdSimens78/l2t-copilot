@@ -106,8 +106,9 @@ pub struct BusState {
     /// Треки хоста (форма уточнится с DawBackend-хостом; пока пусто).
     pub tracks: Vec<Value>,
     pub engine: EngineState,
-    /// Имя сессии хоста (C6, ipc-контракт v0.2); None, пока хост не подключён.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Имя сессии хоста (C6, ipc-контракт v0.2). Ключ присутствует всегда:
+    /// `null`, пока движок не подключён (TS-зеркало: `string | null`).
+    #[serde(default)]
     pub session_name: Option<String>,
 }
 
@@ -132,7 +133,8 @@ pub struct AcceptResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdoptResult {
     pub tempo: f64,
-    pub marker_name: String,
+    /// Имя key-маркера сессии: `Key: <тональность>`.
+    pub marker: String,
 }
 
 /// Выход `run_self_check`.
@@ -143,6 +145,19 @@ pub struct SelfCheckReport {
     pub lufs_delta: f64,
     pub bands_delta: Value,
     pub verdict: String,
+}
+
+// Входы команд — имена полей 1:1 с TS-зеркалом (ui/src/types/contract.ts,
+// `*Input`), snake_case. На проводе Tauri-адаптер передаёт вход одним
+// объектом: `invoke("<command>", { input })` — команды принимают `input`.
+
+/// Вход `analyze_loop`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnalyzeLoopInput {
+    pub path: String,
+    /// v0.2 (C5): скопировать файл в workspace при drop извне песочницы.
+    #[serde(default)]
+    pub copy_into_workspace: Option<bool>,
 }
 
 /// Вход `generate_part`.
@@ -166,10 +181,18 @@ pub struct PartVersion {
     pub version: u64,
 }
 
-/// Вход `analyze_loop` / `run_self_check`.
+/// Вход `adopt_loop` (C1).
 #[derive(Debug, Clone, Deserialize)]
-pub struct PathParams {
-    pub path: String,
+pub struct AdoptLoopParams {
+    pub bpm: f64,
+    pub key: String,
+    pub source: String,
+}
+
+/// Вход `run_self_check`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunSelfCheckInput {
+    pub bounce_path: String,
 }
 
 // --------------------------------------------------------------- события ----
@@ -272,7 +295,64 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["engine"], serde_json::json!("down"));
-        // C6 (v0.2): session_name опционален — отсутствует, а не null
-        assert!(v.get("session_name").is_none());
+        // C6 (v0.2): ключ session_name присутствует всегда — null без движка
+        // (TS-зеркало: `session_name: string | null`)
+        assert!(v.get("session_name").is_some(), "ключ session_name обязан быть");
+        assert!(v["session_name"].is_null());
+    }
+
+    /// Входы команд обязаны читаться из того JSON, что шлёт Tauri-адаптер
+    /// (ui/src/ipc/tauri-adapter.ts: `invoke(cmd, { input })`), а выходы —
+    /// сериализоваться в форму TS-зеркала. Ловит расхождение сторон на
+    /// уровне имён полей без запуска окна.
+    #[test]
+    fn inputs_match_ts_mirror() {
+        let x: AnalyzeLoopInput =
+            serde_json::from_value(serde_json::json!({"path": "/l.wav"})).unwrap();
+        assert_eq!(x.path, "/l.wav");
+        assert_eq!(x.copy_into_workspace, None, "C5-флаг опционален");
+        let x: AnalyzeLoopInput =
+            serde_json::from_value(serde_json::json!({"path": "/l.wav", "copy_into_workspace": true}))
+                .unwrap();
+        assert_eq!(x.copy_into_workspace, Some(true));
+
+        let x: GeneratePartParams =
+            serde_json::from_value(serde_json::json!({"tool": "drums", "params": {"bpm": 90}}))
+                .unwrap();
+        assert_eq!(x.tool, Part::Drums);
+
+        let x: RegenerateParams = serde_json::from_value(
+            serde_json::json!({"part": "bass", "params_diff": {"style": "octaves"}}),
+        )
+        .unwrap();
+        assert_eq!(x.part, Part::Bass);
+
+        let x: PartVersion =
+            serde_json::from_value(serde_json::json!({"part": "chords", "version": 2})).unwrap();
+        assert_eq!((x.part, x.version), (Part::Chords, 2));
+
+        let x: AdoptLoopParams = serde_json::from_value(serde_json::json!({
+            "bpm": 94.5, "key": "D minor", "source": "x-ray"
+        }))
+        .unwrap();
+        assert_eq!((x.bpm, x.key.as_str()), (94.5, "D minor"));
+
+        let x: RunSelfCheckInput =
+            serde_json::from_value(serde_json::json!({"bounce_path": "/b.wav"})).unwrap();
+        assert_eq!(x.bounce_path, "/b.wav");
+
+        // неизвестная партия — ошибка десериализации, а не молчаливый bass
+        assert!(serde_json::from_value::<PartVersion>(
+            serde_json::json!({"part": "pad", "version": 1})
+        )
+        .is_err());
+    }
+
+    /// AdoptLoopOutput TS-зеркала: `{tempo: number, marker: string}`.
+    #[test]
+    fn adopt_result_serializes_tempo_and_marker() {
+        let v = serde_json::to_value(AdoptResult { tempo: 94.0, marker: "Key: D minor".into() })
+            .unwrap();
+        assert_eq!(v, serde_json::json!({"tempo": 94.0, "marker": "Key: D minor"}));
     }
 }

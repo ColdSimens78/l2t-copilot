@@ -81,28 +81,33 @@ pub fn resolve_audio_analyzer() -> ServerConfig {
 
 pub const SOUNDCRAFT_BIN: &str = "/home/ilmir/bin/soundcraft-cli";
 pub const SOUNDCRAFT_WORKSPACE: &str = "/home/ilmir/music-workspace";
+/// Стем рабочей сессии кокпита: `<workspace>/cockpit.scraft`.
+pub const SESSION_STEM: &str = "cockpit";
 
-/// Пресет слота «Движок»: SoundCraft v0.20.1 standalone headless-MCP
-/// (спайк Исход 3 — docs/oss-recon-engines.md, docs/engine-spike-report.md).
+/// Workspace движка (его automation-roots; внутри живёт и staging).
+pub fn resolve_soundcraft_workspace() -> PathBuf {
+    env::var_os("L2T_SOUNDCRAFT_WORKSPACE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(SOUNDCRAFT_WORKSPACE))
+}
+
+/// Пресет слота «Движка»: SoundCraft v0.20.1 standalone headless-MCP
+/// (ратифицирован владельцем; docs/engine-spike-report.md).
 ///
-/// `--demo` поднимает in-process движок без GUI; automation-roots —
+/// Без `--demo`: движок стартует с пустой сессией, ядро открывает в нём
+/// рабочую сессию пользователя (см. `resolve_session_path`). automation-roots —
 /// песочница правила шины №1, встроенная в сам движок. workspace задаётся
 /// env L2T_SOUNDCRAFT_WORKSPACE (по умолчанию ~/music-workspace); бинарь —
-/// L2T_SOUNDCRAFT. Слот пока НЕ входит в CockpitCore: подключение движка —
-/// после ратификации DawBackend владельцем (спайк → facts).
+/// L2T_SOUNDCRAFT.
 pub fn resolve_soundcraft() -> ServerConfig {
-    let command = env::var_os("L2T_SOUNDCRAFT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(SOUNDCRAFT_BIN));
-    let workspace =
-        env::var_os("L2T_SOUNDCRAFT_WORKSPACE").unwrap_or_else(|| SOUNDCRAFT_WORKSPACE.into());
-    let ws = workspace.to_string_lossy().to_string();
+    let command =
+        env::var_os("L2T_SOUNDCRAFT").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(SOUNDCRAFT_BIN));
+    let ws = resolve_soundcraft_workspace().display().to_string();
     ServerConfig {
         name: "soundcraft",
         command,
         args: vec![
             "mcp".into(),
-            "--demo".into(),
             "--automation-read-root".into(),
             ws.clone(),
             "--automation-write-root".into(),
@@ -110,6 +115,27 @@ pub fn resolve_soundcraft() -> ServerConfig {
         ],
         env: HashMap::new(),
     }
+}
+
+/// Путь рабочей сессии пользователя. env L2T_SESSION_PATH переопределяет
+/// (путь должен лежать внутри automation-roots — иначе движок его не
+/// откроет). Иначе — фиксированный файл в workspace: существующий
+/// `cockpit.scraft`, при его отсутствии существующий `cockpit.scraftz` с тем
+/// же стемом (обе формы пишутся движком одинаково), иначе `cockpit.scraft`
+/// (будет создан при первом запуске).
+pub fn resolve_session_path(workspace: &Path) -> PathBuf {
+    if let Some(p) = env::var_os("L2T_SESSION_PATH") {
+        return PathBuf::from(p);
+    }
+    let scraft = workspace.join(format!("{SESSION_STEM}.scraft"));
+    if scraft.is_file() {
+        return scraft;
+    }
+    let scraftz = workspace.join(format!("{SESSION_STEM}.scraftz"));
+    if scraftz.is_file() {
+        return scraftz;
+    }
+    scraft
 }
 
 /// Все серверы шины, которыми владеет ядро на этапе 1.
@@ -152,5 +178,46 @@ mod tests {
     fn bus_configs_cover_both_slots() {
         let names: Vec<_> = bus_configs().iter().map(|c| c.name).collect();
         assert_eq!(names, vec!["audio-analyzer", "midi-gen"]);
+    }
+
+    /// Рабочая сессия, не демо: в аргументах движка не должно быть `--demo`,
+    /// а roots обязаны совпадать с workspace (иначе staging вне песочницы).
+    #[test]
+    fn soundcraft_preset_starts_without_demo() {
+        let cfg = resolve_soundcraft();
+        assert_eq!(cfg.name, "soundcraft");
+        assert!(!cfg.args.iter().any(|a| a == "--demo"), "рабочая сессия, не --demo");
+        let ws = resolve_soundcraft_workspace().display().to_string();
+        let roots: Vec<_> = cfg
+            .args
+            .windows(2)
+            .filter(|w| w[0].starts_with("--automation-"))
+            .map(|w| w[1].clone())
+            .collect();
+        assert_eq!(roots, vec![ws.clone(), ws], "read-root и write-root = workspace");
+    }
+
+    #[test]
+    fn session_path_is_fixed_file_in_workspace() {
+        if std::env::var_os("L2T_SESSION_PATH").is_some() {
+            return; // env переопределяет — ветку не проверить без мутации env
+        }
+        let ws = std::env::temp_dir().join("l2t-core-session-path-test");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let path = ws.join(format!("{SESSION_STEM}.scraft"));
+
+        // нет файла → будет создан cockpit.scraft
+        assert_eq!(resolve_session_path(&ws), path);
+        // лежит .scraftz с тем же стемом → открывается он
+        std::fs::write(ws.join(format!("{SESSION_STEM}.scraftz")), b"{}").unwrap();
+        assert_eq!(
+            resolve_session_path(&ws),
+            ws.join(format!("{SESSION_STEM}.scraftz"))
+        );
+        // оба на месте → приоритет у .scraft
+        std::fs::write(&path, b"{}").unwrap();
+        assert_eq!(resolve_session_path(&ws), path);
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }

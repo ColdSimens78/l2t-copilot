@@ -41,6 +41,9 @@ pub struct CockpitCore {
     suggestions: HashMap<Part, Suggestion>,
     /// Последний проанализированный луп — эталон run_self_check.
     last_loop_xray: Option<XRayReport>,
+    /// Рабочая сессия пользователя (файл .scraft в automation-roots).
+    /// None = сессия не открыта (автосейв пропускается).
+    session_path: Option<PathBuf>,
     /// Журнал шины (источник Tauri-события bus_log).
     bus_log: VecDeque<BusLog>,
 }
@@ -51,15 +54,23 @@ impl CockpitCore {
     /// (правило №1: песочница движка должна покрывать стейджинг — иначе
     /// импорт партий отвергается, факт e2e). Битые слоты не убивают ядро.
     pub async fn connect() -> Self {
-        let ws = std::env::var("L2T_SOUNDCRAFT_WORKSPACE")
-            .unwrap_or_else(|_| crate::config::SOUNDCRAFT_WORKSPACE.into());
-        let mut core =
-            Self::connect_in(resolve_audio_analyzer(), resolve_midi_gen(), PathBuf::from(&ws).join("staging")).await;
+        let ws = crate::config::resolve_soundcraft_workspace();
+        // roots движка должны существовать до его старта (факт спайка)
+        let _ = std::fs::create_dir_all(&ws);
+        let mut core = Self::connect_in(
+            resolve_audio_analyzer(),
+            resolve_midi_gen(),
+            ws.join("staging"),
+        )
+        .await;
         if crate::config::resolve_soundcraft().command.is_file() {
             if let Err(e) = core.attach_engine(crate::config::resolve_soundcraft()).await {
                 eprintln!("[engine] не поднялся: {e}");
             } else {
-                let _ = core.session_new("cockpit").await;
+                let session = crate::config::resolve_session_path(&ws);
+                if let Err(e) = core.session_open_or_create(&session).await {
+                    eprintln!("[engine] рабочая сессия не открылась: {e}");
+                }
             }
         }
         core
@@ -81,6 +92,7 @@ impl CockpitCore {
             staging_dir,
             suggestions: HashMap::new(),
             last_loop_xray: None,
+            session_path: None,
             bus_log: VecDeque::new(),
         }
     }
@@ -171,34 +183,46 @@ impl CockpitCore {
             message: e,
         })?;
         let key = format!("{} {}", crate::keys::PC_NAMES[pc as usize], mode.as_str());
-        let engine = self.engine.as_ref().ok_or_else(|| CoreError::Tool {
-            tool: "daw".into(),
-            message: "движок SoundCraft не подключён (см. get_mcp_slots / Screen 0)".into(),
-        })?;
+        const NOT_UP: &str = "движок SoundCraft не подключён (см. get_mcp_slots / Screen 0)";
 
         let (ms, _) = call_logged(
             &mut self.bus_log,
-            engine,
+            self.engine.as_ref().ok_or_else(|| CoreError::Tool { tool: "daw".into(), message: NOT_UP.into() })?,
             "execute",
             "adopt_loop",
             json!({"command": "event.tempo", "params": {"bpm": bpm}}),
             self.call_timeout,
         )
         .await?;
-        let marker_name = format!("Key: {key}");
-        let (_, marker) = call_logged(
+        let marker = format!("Key: {key}");
+        // повторный adopt не копит дубли: старые key-маркеры стираем
+        delete_stale_key_markers(
             &mut self.bus_log,
-            engine,
+            self.engine.as_ref().ok_or_else(|| CoreError::Tool { tool: "daw".into(), message: NOT_UP.into() })?,
+            &marker,
+            self.call_timeout,
+        )
+        .await;
+        let (_, marker_res) = call_logged(
+            &mut self.bus_log,
+            self.engine.as_ref().ok_or_else(|| CoreError::Tool { tool: "daw".into(), message: NOT_UP.into() })?,
             "execute",
             "adopt_loop",
             json!({"command": "markers.add",
-                   "params": {"name": marker_name, "at": 0, "kind": "key"}}),
+                   "params": {"name": marker, "at": 0, "kind": "key"}}),
             self.call_timeout,
         )
         .await?;
-        println!("[adopt_loop] {key} @ {bpm} BPM от {source:?}: {} мс, маркер {marker}",
-            ms.as_millis());
-        Ok(AdoptResult { tempo: bpm, marker_name })
+        // автосейв: adoption — изменение сессии пользователя, файл должен
+        // быть актуален сразу (падение процесса не теряет adopt)
+        if let Err(e) = self.session_save().await {
+            eprintln!("[adopt_loop] автосейв не удался (изменение живо в памяти движка): {e}");
+        }
+        println!(
+            "[adopt_loop] {key} @ {bpm} BPM от {source:?}: {} мс, маркер {marker} ({marker_res})",
+            ms.as_millis()
+        );
+        Ok(AdoptResult { tempo: bpm, marker })
     }
 
     /// Вызов суб-инструмента analyzer с журналированием; текст отчёта.
@@ -326,6 +350,18 @@ impl CockpitCore {
                 message: format!("версия {version} не текущая (текущая {})", current.version),
             });
         }
+        // идемпотентность: повторный Accept той же версии не плодит дубль-трек
+        // (пользователь может кликнуть дважды; import_midi каждый раз создаёт
+        // новый трек — факт спайка)
+        if current.status == SuggestionStatus::Accepted {
+            return Err(CoreError::Tool {
+                tool: "daw.import_midi".into(),
+                message: format!(
+                    "партия {} v{version} уже принята в сессию; для новой версии жми Regenerate",
+                    part_str(part)
+                ),
+            });
+        }
         let mid = self.staging_dir.join(format!("{}_v{version}.mid", part_str(part)));
         if !mid.is_file() {
             return Err(CoreError::Tool {
@@ -377,6 +413,12 @@ impl CockpitCore {
         self.suggestions.get_mut(&part).unwrap().status = SuggestionStatus::Accepted;
         staging::staging_log_decision(&self.staging_dir, part, version, SuggestionStatus::Accepted)?;
         println!("[accept] {part:?} v{version}: {} мс, треки {names:?}", ms.as_millis());
+        // автосейв: партия уже в сессии движка — файл должен это помнить.
+        // Best-effort: контрактный ответ (импортировано) уже истинен; неудача
+        // сохранения не откатывает его (следующий автосейв догонит).
+        if let Err(e) = self.session_save().await {
+            eprintln!("[accept] автосейв не удался (партия жива в памяти движка): {e}");
+        }
         Ok(AcceptResult { imported_tracks: names })
     }
 
@@ -536,24 +578,93 @@ impl CockpitCore {
         json!({"ok": self.audio_analyzer.is_some() || self.midi_gen.is_some()})
     }
 
-    /// Новая пустая сессия в движке (headless-воркфлоу — follow-up спайка:
-    /// create/save/open внутри roots работает). Best-effort при старте кокпита.
-    pub async fn session_new(&mut self, name: &str) -> CoreResult<Value> {
+    /// **Рабочая сессия пользователя** (зазор №1 спайка, ратифицировано):
+    /// если файл существует — `open_session`, иначе — `new_session` (имя =
+    /// стем файла: open всегда берёт стем, факт спайка) + немедленный
+    /// `save_session`, чтобы файл существовал с первого запуска. Путь
+    /// запоминается — автосейв после adopt/accept пишет в него.
+    pub async fn session_open_or_create(&mut self, path: &Path) -> CoreResult<Value> {
+        if path.extension().is_none_or(|e| e != "scraft" && e != "scraftz") {
+            return Err(CoreError::Tool {
+                tool: "session".into(),
+                message: format!(
+                    "ожидал .scraft/.scraftz, получил {}: расширение сессии обязательно",
+                    path.display()
+                ),
+            });
+        }
         let engine = self.engine.as_ref().ok_or_else(|| CoreError::Tool {
-            tool: "new_session".into(),
+            tool: "session".into(),
+            message: "движок SoundCraft не подключён".into(),
+        })?;
+        let v = if path.is_file() {
+            let (_, v) = call_logged(
+                &mut self.bus_log,
+                engine,
+                "open_session",
+                "session_open",
+                json!({"path": path.display().to_string()}),
+                self.call_timeout,
+            )
+            .await?;
+            println!("[session] открыта {}: {}", path.display(), v);
+            v
+        } else {
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "cockpit".into());
+            let (_, _) = call_logged(
+                &mut self.bus_log,
+                engine,
+                "new_session",
+                "session_new",
+                json!({"name": stem, "sample_rate": 44100, "template": "blank"}),
+                self.call_timeout,
+            )
+            .await?;
+            let (_, sv) = call_logged(
+                &mut self.bus_log,
+                engine,
+                "save_session",
+                "session_save",
+                json!({"path": path.display().to_string()}),
+                self.call_timeout,
+            )
+            .await?;
+            println!("[session] создана {} ({sv})", path.display());
+            json!({"created": true, "name": stem, "path": path.display().to_string()})
+        };
+        self.session_path = Some(path.to_path_buf());
+        Ok(v)
+    }
+
+    /// Сохранить рабочую сессию (без сессии — no-op с пометкой).
+    pub async fn session_save(&mut self) -> CoreResult<Value> {
+        let Some(path) = self.session_path.clone() else {
+            return Ok(json!({"saved": false, "reason": "рабочая сессия не открыта"}));
+        };
+        let engine = self.engine.as_ref().ok_or_else(|| CoreError::Tool {
+            tool: "save_session".into(),
             message: "движок SoundCraft не подключён".into(),
         })?;
         let (_, v) = call_logged(
             &mut self.bus_log,
             engine,
-            "new_session",
-            "session_new",
-            json!({"name": name, "sample_rate": 44100, "template": "blank"}),
+            "save_session",
+            "session_save",
+            json!({"path": path.display().to_string()}),
             self.call_timeout,
         )
         .await?;
         Ok(v)
     }
+
+    /// Путь рабочей сессии (для Tauri-слоя и отчётов).
+    pub fn session_path(&self) -> Option<&Path> {
+        self.session_path.as_deref()
+    }
+
 
     /// Bounce сессии движком (`file.bounce_mix`) — правило №5: ядро
     /// оркестрирует, не синтезирует. Путь — внутри automation-roots.
@@ -614,6 +725,47 @@ impl CockpitCore {
             tool: "staging".into(),
             message: format!("не создал {}: {e}", self.staging_dir.display()),
         })
+    }
+}
+
+
+/// Стереть прежние key-маркеры (конвенция «Key: …») перед добавлением
+/// нового: повторный adopt_loop не копит дубли. Ошибки отдельных удалений
+/// не фатальны (маркер мог исчезнуть). Свободная функция: log и engine —
+/// разные поля фасада (disjoint borrows).
+async fn delete_stale_key_markers(
+    log: &mut VecDeque<BusLog>,
+    engine: &BusServer,
+    keep: &str,
+    timeout: Duration,
+) {
+    let Ok((_, insp)) = call_logged(
+        log, engine, "inspect_session", "adopt_loop",
+        json!({"detail": "full"}), timeout,
+    )
+    .await
+    else {
+        return;
+    };
+    let stale: Vec<u64> = insp
+        .get("markers")
+        .and_then(Value::as_array)
+        .map(|ms| {
+            ms.iter()
+                .filter_map(|m| {
+                    let id = m.get("id").and_then(Value::as_u64)?;
+                    let name = m.get("name").and_then(Value::as_str)?;
+                    (name.starts_with("Key: ") && name != keep).then_some(id)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in stale {
+        let _ = call_logged(
+            log, engine, "execute", "adopt_loop",
+            json!({"command": "markers.delete", "params": {"id": id}}), timeout,
+        )
+        .await;
     }
 }
 

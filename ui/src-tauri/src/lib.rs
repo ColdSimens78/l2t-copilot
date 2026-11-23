@@ -13,8 +13,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use l2t_core::contract::{
-    AcceptResult, BusState, EngineState, HostStatus, Part, SelfCheckReport, Suggestion,
-    SuggestionUpdated, XRayReport,
+    AcceptResult, AdoptLoopParams, AdoptResult, AnalyzeLoopInput, BusState, EngineState,
+    GeneratePartParams, HostStatus, PartVersion, RegenerateParams, RunSelfCheckInput,
+    SelfCheckReport, Suggestion, SuggestionUpdated, XRayReport,
 };
 use l2t_core::CockpitCore;
 use serde_json::Value;
@@ -57,16 +58,15 @@ fn emit_suggestion(app: &AppHandle, suggestion: &Suggestion) {
 async fn analyze_loop(
     app: AppHandle,
     core: State<'_, Mutex<CockpitCore>>,
-    path: String,
-    copy_into_workspace: Option<bool>,
+    input: AnalyzeLoopInput,
 ) -> Result<XRayReport, String> {
     let mut core = core.lock().await;
     // C5 (v0.2): дроп-зона может дать путь вне workspace — тогда копию
     // в staging/loops анализируем (правило шины №1).
-    let report = if copy_into_workspace.unwrap_or(false) {
-        core.analyze_loop_copied(std::path::Path::new(&path)).await
+    let report = if input.copy_into_workspace.unwrap_or(false) {
+        core.analyze_loop_copied(std::path::Path::new(&input.path)).await
     } else {
-        core.analyze_loop(std::path::Path::new(&path)).await
+        core.analyze_loop(std::path::Path::new(&input.path)).await
     }
     .map_err(|e| e.to_string())?;
     emit_bus_log(&app, &mut core);
@@ -77,11 +77,13 @@ async fn analyze_loop(
 async fn generate_part(
     app: AppHandle,
     core: State<'_, Mutex<CockpitCore>>,
-    tool: Part,
-    params: Value,
+    input: GeneratePartParams,
 ) -> Result<Suggestion, String> {
     let mut core = core.lock().await;
-    let suggestion = core.generate_part(tool, params).await.map_err(|e| e.to_string())?;
+    let suggestion = core
+        .generate_part(input.tool, input.params)
+        .await
+        .map_err(|e| e.to_string())?;
     emit_bus_log(&app, &mut core);
     emit_suggestion(&app, &suggestion);
     Ok(suggestion)
@@ -91,11 +93,13 @@ async fn generate_part(
 async fn regenerate(
     app: AppHandle,
     core: State<'_, Mutex<CockpitCore>>,
-    part: Part,
-    params_diff: Value,
+    input: RegenerateParams,
 ) -> Result<Suggestion, String> {
     let mut core = core.lock().await;
-    let suggestion = core.regenerate(part, params_diff).await.map_err(|e| e.to_string())?;
+    let suggestion = core
+        .regenerate(input.part, input.params_diff)
+        .await
+        .map_err(|e| e.to_string())?;
     emit_bus_log(&app, &mut core);
     emit_suggestion(&app, &suggestion);
     Ok(suggestion)
@@ -105,14 +109,16 @@ async fn regenerate(
 async fn accept_part(
     app: AppHandle,
     core: State<'_, Mutex<CockpitCore>>,
-    part: Part,
-    version: u64,
+    input: PartVersion,
 ) -> Result<AcceptResult, String> {
     let mut core = core.lock().await;
-    let result = core.accept_part(part, version).await.map_err(|e| e.to_string())?;
+    let result = core
+        .accept_part(input.part, input.version)
+        .await
+        .map_err(|e| e.to_string())?;
     emit_bus_log(&app, &mut core);
     // статус сменился на accepted — фронт обязан увидеть новую версию
-    if let Some(s) = core.suggestion(part).cloned() {
+    if let Some(s) = core.suggestion(input.part).cloned() {
         emit_suggestion(&app, &s);
     }
     Ok(result)
@@ -122,13 +128,12 @@ async fn accept_part(
 async fn reject_part(
     app: AppHandle,
     core: State<'_, Mutex<CockpitCore>>,
-    part: Part,
-    version: u64,
+    input: PartVersion,
 ) -> Result<(), String> {
     let mut core = core.lock().await;
-    core.reject_part(part, version).map_err(|e| e.to_string())?;
+    core.reject_part(input.part, input.version).map_err(|e| e.to_string())?;
     emit_bus_log(&app, &mut core);
-    if let Some(s) = core.suggestion(part).cloned() {
+    if let Some(s) = core.suggestion(input.part).cloned() {
         emit_suggestion(&app, &s);
     }
     Ok(())
@@ -158,11 +163,13 @@ async fn get_mcp_slots(
 async fn run_self_check(
     app: AppHandle,
     core: State<'_, Mutex<CockpitCore>>,
-    bounce_path: String,
+    input: RunSelfCheckInput,
 ) -> Result<SelfCheckReport, String> {
     let mut core = core.lock().await;
-    let report =
-        core.run_self_check(std::path::Path::new(&bounce_path)).await.map_err(|e| e.to_string())?;
+    let report = core
+        .run_self_check(std::path::Path::new(&input.bounce_path))
+        .await
+        .map_err(|e| e.to_string())?;
     emit_bus_log(&app, &mut core);
     Ok(report)
 }
@@ -184,12 +191,13 @@ async fn render_preview(mid_path: String) -> Result<String, String> {
 async fn adopt_loop(
     app: AppHandle,
     core: State<'_, Mutex<CockpitCore>>,
-    bpm: f64,
-    key: String,
-    source: String,
-) -> Result<l2t_core::contract::AdoptResult, String> {
+    input: AdoptLoopParams,
+) -> Result<AdoptResult, String> {
     let mut core = core.lock().await;
-    let result = core.adopt_loop(bpm, &key, &source).await.map_err(|e| e.to_string())?;
+    let result = core
+        .adopt_loop(input.bpm, &input.key, &input.source)
+        .await
+        .map_err(|e| e.to_string())?;
     emit_bus_log(&app, &mut core);
     Ok(result)
 }
@@ -239,25 +247,25 @@ fn e2e_js() -> Option<String> {
   const invoke = (t.core && t.core.invoke) ? t.core.invoke : t.invoke;
   const say = (k, v) => invoke('spike_report', {{ key: k, value: String(v) }}).catch(() => {{}});
   try {{
-    const xray = await invoke('analyze_loop', {{ path: '{loop_path}' }});
+    const xray = await invoke('analyze_loop', {{ input: {{ path: '{loop_path}' }} }});
     await say('e2e_loop_path', '{loop_path}');
     await say('e2e_xray', JSON.stringify({{ bpm: xray.bpm, key: xray.key, key_conf: xray.key_confidence }}));
     // Полный контур этапа 2 (критерий): adopt → bus → generate → preview
     // → accept → bounce → self-check
-    const adopt = await invoke('adopt_loop', {{ bpm: xray.bpm, key: xray.key, source: 'e2e-loop' }});
+    const adopt = await invoke('adopt_loop', {{ input: {{ bpm: xray.bpm, key: xray.key, source: 'e2e-loop' }} }});
     await say('e2e_adopt', JSON.stringify(adopt));
     const st = await invoke('get_bus_state');
     await say('e2e_bus', JSON.stringify({{ engine: st.engine, tempo: st.tempo, key: st.key_marker, tracks: st.tracks.length, session: st.session_name }}));
-    const s = await invoke('generate_part', {{ tool: 'bass', params: {{ bpm: xray.bpm, key: xray.key, style: 'syncopated' }} }});
+    const s = await invoke('generate_part', {{ input: {{ tool: 'bass', params: {{ bpm: Math.round(xray.bpm), key: xray.key, style: 'syncopated' }} }} }});
     const mid = s.params.output_path;
     await say('e2e_bass', JSON.stringify({{ version: s.version, notes: s.notes.length, mid }}));
     const wav = await invoke('render_preview', {{ midPath: mid }});
     await say('e2e_preview', wav);
-    const acc = await invoke('accept_part', {{ part: 'bass', version: s.version }});
+    const acc = await invoke('accept_part', {{ input: {{ part: 'bass', version: s.version }} }});
     await say('e2e_accept', JSON.stringify(acc));
     const bounce = await invoke('bounce', {{ path: '{bounce_path}' }});
     await say('e2e_bounce', JSON.stringify(bounce));
-    const check = await invoke('run_self_check', {{ bouncePath: '{bounce_path}' }});
+    const check = await invoke('run_self_check', {{ input: {{ bounce_path: '{bounce_path}' }} }});
     await say('e2e_selfcheck', JSON.stringify(check));
     await say('e2e_done', 'ok');
   }} catch (e) {{
