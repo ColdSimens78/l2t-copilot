@@ -46,13 +46,19 @@ export interface CockpitApi {
   onHostStatus(handler: (event: HostStatusEvent) => void): Unsubscribe;
 }
 
-// ─── Переключение адаптеров: ОДНА строка ──────────────────────────────────
-// MOCK (v0, весь UI кликабелен на симуляции ядра) ↔ TAURI (после вживления
-// ядра ядром — без правок экранов; см. tauri-adapter.ts).
+// ─── Переключение адаптеров: авто-детект среды ────────────────────────────
+// MOCK (весь UI кликабелен на симуляции ядра) ↔ TAURI (живое ядро).
+// `window.__TAURI_INTERNALS__` существует только внутри Tauri-окна; в обычном
+// браузере его нет — и это НЕ ошибка: браузер = дев-харнесс, работает mock.
 import { mockAdapter } from "@/ipc/mock-adapter";
 import { tauriAdapter } from "@/ipc/tauri-adapter";
-export const currentAdapter: CockpitApi = tauriAdapter;
-// export const currentAdapter: CockpitApi = tauriAdapter;
+
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+/** «mock» в браузере/дев-харнессе, «tauri» в десктоп-окне. Для индикатора TopBar. */
+export const adapterMode: "mock" | "tauri" = isTauri ? "tauri" : "mock";
+
+export const currentAdapter: CockpitApi = isTauri ? tauriAdapter : mockAdapter;
 
 /** Контекст для компонентов. Провайдер — в store/cockpit.tsx. */
 import { createContext, useContext } from "react";
