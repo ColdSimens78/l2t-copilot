@@ -51,10 +51,7 @@ export interface CockpitApi {
 // ядра ядром — без правок экранов; см. tauri-adapter.ts).
 import { mockAdapter } from "@/ipc/mock-adapter";
 import { tauriAdapter } from "@/ipc/tauri-adapter";
-// tauriAdapter доступен для будущей проверки типов:
-void tauriAdapter;
-
-export const currentAdapter: CockpitApi = mockAdapter;
+export const currentAdapter: CockpitApi = tauriAdapter;
 // export const currentAdapter: CockpitApi = tauriAdapter;
 
 /** Контекст для компонентов. Провайдер — в store/cockpit.tsx. */
