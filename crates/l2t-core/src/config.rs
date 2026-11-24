@@ -84,6 +84,14 @@ pub const SOUNDCRAFT_WORKSPACE: &str = "/home/ilmir/music-workspace";
 /// Стем рабочей сессии кокпита: `<workspace>/cockpit.scraft`.
 pub const SESSION_STEM: &str = "cockpit";
 
+/// Каталог экспорта WAV («Save WAV» из окна): env L2T_EXPORT_DIR,
+/// иначе `<workspace>/export` (внутри automation-roots — правило №1).
+pub fn resolve_export_dir() -> PathBuf {
+    env::var_os("L2T_EXPORT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| resolve_soundcraft_workspace().join("export"))
+}
+
 /// Workspace движка (его automation-roots; внутри живёт и staging).
 pub fn resolve_soundcraft_workspace() -> PathBuf {
     env::var_os("L2T_SOUNDCRAFT_WORKSPACE")

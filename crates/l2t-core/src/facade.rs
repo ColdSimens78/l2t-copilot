@@ -20,8 +20,9 @@ use serde_json::{json, Map, Value};
 use crate::bus::{BusServer, DEFAULT_CALL_TIMEOUT};
 use crate::config::{resolve_audio_analyzer, resolve_midi_gen, ServerConfig};
 use crate::contract::{
-    AcceptResult, AdoptResult, BusLog, BusLogStatus, BusState, EngineState, Part,
-    SelfCheckReport, Suggestion, SuggestionStatus, XRayReport,
+    AcceptResult, AdoptResult, BusLog, BusLogStatus, BusState, EngineState, ExportTrackOutput,
+    LoudnessSource, MasteringApplied, MasteringReport, MasteringVerdict, MasterTarget, Part,
+    SelfCheckReport, Suggestion, SuggestionStatus, XRayReport, ON_TARGET_LU, SILENCE_LUFS,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::notes;
@@ -117,10 +118,18 @@ impl CockpitCore {
     /// sections.rs, issue #3) + нормализация текстовых отчётов. Результат
     /// запоминается как эталон Self-Check.
     pub async fn analyze_loop(&mut self, path: &Path) -> CoreResult<XRayReport> {
-        let rhythm = self.analyzer_text(path, "rhythm_analysis").await?;
-        let info = self.analyzer_text(path, "audio_info").await?;
-        let spectral = self.analyzer_text(path, "spectral_features").await?;
-        let harmonic = self.analyzer_text(path, "harmonic_analysis").await?;
+        let rhythm = self
+            .analyzer_text(path, "rhythm_analysis", "analyze_loop")
+            .await?;
+        let info = self
+            .analyzer_text(path, "audio_info", "analyze_loop")
+            .await?;
+        let spectral = self
+            .analyzer_text(path, "spectral_features", "analyze_loop")
+            .await?;
+        let harmonic = self
+            .analyzer_text(path, "harmonic_analysis", "analyze_loop")
+            .await?;
         let (key, key_confidence) = ap::key_of(&harmonic)?;
         let (bpm, bpm_confidence) = ap::tempo_of(&rhythm)?;
         let (lufs, true_peak) = ap::loudness_of(&spectral)?;
@@ -226,7 +235,13 @@ impl CockpitCore {
     }
 
     /// Вызов суб-инструмента analyzer с журналированием; текст отчёта.
-    async fn analyzer_text(&mut self, path: &Path, tool: &str) -> CoreResult<String> {
+    /// `command` — команда кокпита, из-за которой идёт вызов (журнал шины).
+    async fn analyzer_text(
+        &mut self,
+        path: &Path,
+        tool: &str,
+        command: &str,
+    ) -> CoreResult<String> {
         let server = self
             .audio_analyzer
             .as_ref()
@@ -237,7 +252,7 @@ impl CockpitCore {
             &mut self.bus_log,
             server,
             tool,
-            "analyze_loop",
+            command,
             Value::Object(args),
             self.call_timeout,
         )
@@ -253,6 +268,19 @@ impl CockpitCore {
                 structured: Some(v.clone()),
             })?;
         Ok(text.to_string())
+    }
+
+    /// Громкость файла по analyzer — повторная проверка экспорта с целью.
+    /// Не касается `last_loop_xray`: эталон Self-Check остаётся лупом, а не
+    /// экспортом. `None` — слот analyzer не жив либо отчёт не читается
+    /// (ошибка остаётся в журнале шины).
+    async fn measure_lufs(&mut self, path: &Path) -> Option<f64> {
+        let spectral = self
+            .analyzer_text(path, "spectral_features", "export_track")
+            .await
+            .ok()?;
+        let lufs = ap::loudness_of(&spectral).ok()?.0;
+        lufs.is_finite().then_some(lufs)
     }
 
     // ---------------------------------------------------- generate_part ----
@@ -665,6 +693,98 @@ impl CockpitCore {
         self.session_path.as_deref()
     }
 
+    /// **Экспорт трека из окна** («Save WAV», принцип владельца: трек уходит
+    /// напрямую из приложения): bounce сессии движком в путь экспорта.
+    /// Default: `<export-dir>/l2t-export-<время>.wav`, где export-dir =
+    /// env L2T_EXPORT_DIR или `<workspace>/export` (внутри automation-roots —
+    /// правило №1). С целью громкости (Mastering Targets v0, контракт v0.2.1)
+    /// к отчёту движка добавляется блок `mastering` — см. `export_mastered`.
+    /// Сессию движка экспорт не меняет.
+    pub async fn export_track(
+        &mut self,
+        output_path: Option<&Path>,
+        target: MasterTarget,
+    ) -> CoreResult<ExportTrackOutput> {
+        let path = match output_path {
+            Some(p) => p.to_path_buf(),
+            None => {
+                let dir = crate::config::resolve_export_dir();
+                create_dir(&dir, "export_track")?;
+                let stamp = now_ms();
+                dir.join(match target {
+                    MasterTarget::Bypass => format!("l2t-export-{stamp}.wav"),
+                    _ => format!("l2t-export-{}-{stamp}.wav", target.as_str()),
+                })
+            }
+        };
+        if let Some(parent) = path.parent() {
+            create_dir(parent, "export_track")?;
+        }
+        let engine = self.engine.as_ref().ok_or_else(|| CoreError::Tool {
+            tool: "export_track".into(),
+            message: "движок SoundCraft не подключён".into(),
+        })?;
+        let (report, mastered) = match target.target_lufs() {
+            None => (
+                bounce_to(&mut self.bus_log, engine, &path, false, self.call_timeout).await?,
+                None,
+            ),
+            Some(target_lufs) => {
+                let (report, applied, silent) = export_mastered(
+                    &mut self.bus_log,
+                    engine,
+                    &path,
+                    target_lufs,
+                    self.call_timeout,
+                )
+                .await?;
+                (report, Some((applied, silent)))
+            }
+        };
+        // повторная проверка анализатором: вердикт — по независимому замеру
+        let mastering = match (target.target_lufs(), mastered) {
+            (Some(target_lufs), Some((applied, silent))) => {
+                let (achieved_lufs, measured_by) = match self.measure_lufs(&path).await {
+                    Some(lufs) => (lufs, LoudnessSource::Analyzer),
+                    None => (report.lufs, LoudnessSource::Engine),
+                };
+                Some(mastering_report(
+                    target_lufs,
+                    applied,
+                    achieved_lufs,
+                    silent,
+                    measured_by,
+                ))
+            }
+            _ => None,
+        };
+        let output = ExportTrackOutput {
+            path: path.display().to_string(),
+            seconds: report.seconds,
+            lufs: report.lufs,
+            peak_db: report.peak_db,
+            true_peak_db: report.true_peak_db,
+            target,
+            mastering,
+        };
+        println!(
+            "[export] {} ({:.2} с): {:.2} LUFS, пик {:.2} dBFS{}",
+            path.display(),
+            output.seconds,
+            output.lufs,
+            output.peak_db,
+            output
+                .mastering
+                .as_ref()
+                .map(|m| format!(
+                    ", mastering {}",
+                    serde_json::to_string(m).unwrap_or_default()
+                ))
+                .unwrap_or_default()
+        );
+        Ok(output)
+    }
+
 
     /// Bounce сессии движком (`file.bounce_mix`) — правило №5: ядро
     /// оркестрирует, не синтезирует. Путь — внутри automation-roots.
@@ -769,6 +889,157 @@ async fn delete_stale_key_markers(
     }
 }
 
+/// Потолок пика нормализации движка (`file.bounce_mix {normalize}`), dBFS.
+const PEAK_CEILING_DBFS: f64 = -0.1;
+
+/// Отчёт движка о bounce (`file.bounce_mix`) — форма контракт-теста движка.
+#[derive(Debug, Clone, PartialEq)]
+struct BounceReport {
+    seconds: f64,
+    lufs: f64,
+    peak_db: f64,
+    true_peak_db: f64,
+}
+
+/// Bounce сессии движком в `path`. Сессию не меняет: экспорт читает её,
+/// а не редактирует.
+async fn bounce_to(
+    log: &mut VecDeque<BusLog>,
+    engine: &BusServer,
+    path: &Path,
+    normalize: bool,
+    timeout: Duration,
+) -> CoreResult<BounceReport> {
+    let (_, v) = call_logged(
+        log, engine, "execute", "export_track",
+        json!({"command": "file.bounce_mix",
+               "params": {"path": path.display().to_string(), "format": "wav", "normalize": normalize}}),
+        timeout,
+    )
+    .await?;
+    bounce_report(&v)
+}
+
+/// Разбор отчёта движка: пропавшее или нечисловое поле — bounded-ошибка,
+/// никаких выдуманных значений.
+fn bounce_report(v: &Value) -> CoreResult<BounceReport> {
+    let number = |key: &str| {
+        v.get(key)
+            .and_then(Value::as_f64)
+            .filter(|x| x.is_finite())
+            .ok_or_else(|| CoreError::Tool {
+                tool: "file.bounce_mix".into(),
+                message: format!("в отчёте bounce нет числа «{key}»: {v}"),
+            })
+    };
+    Ok(BounceReport {
+        seconds: number("seconds")?,
+        lufs: number("lufs")?,
+        peak_db: number("peak_db")?,
+        true_peak_db: number("true_peak_db")?,
+    })
+}
+
+/// Экспорт с целью громкости (Mastering Targets v0). Движок не нормализует
+/// до LUFS — только по пику (−0.1 dBFS), — поэтому контур такой: сырой
+/// bounce в соседний временный файл → решение (`plan_mastering`) → либо
+/// файл остаётся как есть, либо движок рендерит ту же сессию с normalize.
+/// Возвращает отчёт о финальном файле, применённый шаг и признак тишины.
+async fn export_mastered(
+    log: &mut VecDeque<BusLog>,
+    engine: &BusServer,
+    path: &Path,
+    target_lufs: f64,
+    timeout: Duration,
+) -> CoreResult<(BounceReport, MasteringApplied, bool)> {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "l2t-export".into());
+    let raw = path.with_file_name(format!(".{stem}.l2t-raw-{}.wav", now_ms()));
+    let outcome = async {
+        let first = bounce_to(log, engine, &raw, false, timeout).await?;
+        let silent = first.lufs <= SILENCE_LUFS;
+        match plan_mastering(first.lufs, first.peak_db, target_lufs) {
+            MasteringApplied::Untouched => {
+                std::fs::rename(&raw, path).map_err(|e| CoreError::Tool {
+                    tool: "export_track".into(),
+                    message: format!("не перенёс {} в {}: {e}", raw.display(), path.display()),
+                })?;
+                Ok((first, MasteringApplied::Untouched, silent))
+            }
+            MasteringApplied::Normalized => {
+                let report = bounce_to(log, engine, path, true, timeout).await?;
+                Ok((report, MasteringApplied::Normalized, silent))
+            }
+        }
+    }
+    .await;
+    // сырой bounce — промежуточный файл; после rename его уже нет
+    let _ = std::fs::remove_file(&raw);
+    outcome
+}
+
+/// Решение по цели для bounce с измерениями `lufs`/`peak`. Normalize
+/// поднимает пик до `PEAK_CEILING_DBFS`, громкость сдвигается на тот же
+/// гейн (интегральный LUFS линейно следует чистому гейну — сверен на
+/// демо-сессии движка), поэтому решение известно до второго рендера.
+fn plan_mastering(lufs: f64, peak: f64, target_lufs: f64) -> MasteringApplied {
+    // пики выше безопасного потолка снимаются всегда, цель ни при чём
+    if peak > PEAK_CEILING_DBFS {
+        return MasteringApplied::Normalized;
+    }
+    let gain = PEAK_CEILING_DBFS - peak;
+    // тише гейта EBU R128 громкости нет; пик уже на потолке — гейна нет
+    if lufs <= SILENCE_LUFS || gain < 0.05 {
+        return MasteringApplied::Untouched;
+    }
+    // нормализация приближает к цели — применяем; отдаляет — оставляем как есть
+    let distance_now = (lufs - target_lufs).abs();
+    let distance_after = (lufs + gain - target_lufs).abs();
+    if distance_after < distance_now {
+        MasteringApplied::Normalized
+    } else {
+        MasteringApplied::Untouched
+    }
+}
+
+/// Отчёт по цели из измерений финального файла.
+fn mastering_report(
+    target_lufs: f64,
+    applied: MasteringApplied,
+    achieved_lufs: f64,
+    silent: bool,
+    measured_by: LoudnessSource,
+) -> MasteringReport {
+    let achieved_lufs = round2(achieved_lufs);
+    let delta = round2(target_lufs - achieved_lufs);
+    let verdict = if silent {
+        MasteringVerdict::Silent
+    } else if delta.abs() <= ON_TARGET_LU {
+        MasteringVerdict::OnTarget
+    } else if delta > 0.0 {
+        MasteringVerdict::BelowTarget
+    } else {
+        MasteringVerdict::AboveTarget
+    };
+    MasteringReport {
+        target_lufs,
+        applied,
+        achieved_lufs,
+        delta,
+        verdict,
+        measured_by,
+    }
+}
+
+fn create_dir(dir: &Path, tool: &str) -> CoreResult<()> {
+    std::fs::create_dir_all(dir).map_err(|e| CoreError::Tool {
+        tool: tool.into(),
+        message: format!("не создал {}: {e}", dir.display()),
+    })
+}
+
 /// Вызов с журналированием (событие bus_log: ts/tool/command/status/ms).
 /// Свободная функция: журнал и сервер — разные поля фасада, так borrow-
 /// checker пускает одновременный `&mut bus_log` и `&server`.
@@ -852,5 +1123,111 @@ fn unavailable(slot: &str) -> CoreError {
     CoreError::Tool {
         tool: slot.into(),
         message: "сервер слота не подключён (см. get_mcp_slots)".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::{APPLE_LUFS, SPOTIFY_LUFS};
+
+    /// Демо-сессия движка v0.20.1: сырой bounce −19.37 LUFS при пике −4.35,
+    /// с normalize −15.12 при пике −0.1.
+    const DEMO_RAW: (f64, f64) = (-19.37, -4.35);
+
+    /// Нормализация приближает к цели — в том числе когда перелетает её:
+    /// для Apple −16 нормализованный −15.12 ближе (1.12), чем сырой (3.37).
+    #[test]
+    fn normalize_is_applied_when_it_gets_closer_to_target() {
+        assert_eq!(
+            plan_mastering(DEMO_RAW.0, DEMO_RAW.1, SPOTIFY_LUFS),
+            MasteringApplied::Normalized
+        );
+        assert_eq!(
+            plan_mastering(DEMO_RAW.0, DEMO_RAW.1, APPLE_LUFS),
+            MasteringApplied::Normalized
+        );
+    }
+
+    /// Уже громкий материал нормализация уводит от цели дальше, чем сырой
+    /// bounce, — тогда файл остаётся как есть.
+    #[test]
+    fn normalize_is_skipped_when_raw_bounce_is_closer() {
+        // −14.5 LUFS при пике −1: нормализация даст −13.6 — громче цели
+        // Apple на 2.4, сырой тише на 1.5
+        assert_eq!(
+            plan_mastering(-14.5, -1.0, APPLE_LUFS),
+            MasteringApplied::Untouched
+        );
+    }
+
+    /// Пики выше безопасного потолка снимаются всегда; тишина и файл на
+    /// потолке остаются как есть.
+    #[test]
+    fn peak_ceiling_silence_and_hot_peaks() {
+        assert_eq!(
+            plan_mastering(-20.0, 0.5, APPLE_LUFS),
+            MasteringApplied::Normalized
+        );
+        assert_eq!(
+            plan_mastering(-144.0, -144.0, SPOTIFY_LUFS),
+            MasteringApplied::Untouched
+        );
+        assert_eq!(
+            plan_mastering(-15.1, -0.1, SPOTIFY_LUFS),
+            MasteringApplied::Untouched
+        );
+    }
+
+    /// Вердикт следует знаку дельты и допуску; тишина перекрывает всё.
+    #[test]
+    fn verdict_follows_delta_sign_and_tolerance() {
+        let report = |achieved, silent| {
+            mastering_report(
+                SPOTIFY_LUFS,
+                MasteringApplied::Normalized,
+                achieved,
+                silent,
+                LoudnessSource::Analyzer,
+            )
+        };
+        let m = report(-15.1, false);
+        assert_eq!(
+            (m.achieved_lufs, m.delta, m.verdict),
+            (-15.1, 1.1, MasteringVerdict::BelowTarget)
+        );
+        assert_eq!(report(-14.6, false).verdict, MasteringVerdict::OnTarget);
+        // 1.12 LU — уже за допуском 1.0
+        assert_eq!(report(-15.12, false).verdict, MasteringVerdict::BelowTarget);
+        let loud = report(-12.4, false);
+        assert_eq!(
+            (loud.delta, loud.verdict),
+            (-1.6, MasteringVerdict::AboveTarget)
+        );
+        assert_eq!(report(-70.0, true).verdict, MasteringVerdict::Silent);
+    }
+
+    /// Отчёт движка читается по форме контракт-теста; пропавшее поле —
+    /// bounded-ошибка с именем поля.
+    #[test]
+    fn bounce_report_requires_finite_numbers() {
+        let v = json!({
+            "bytes": 16095306,
+            "lufs": -15.12350845336914,
+            "path": "/ws/n.wav",
+            "peak_db": -0.10000041872262955,
+            "seconds": 55.884,
+            "true_peak_db": -0.0775223821401596
+        });
+        let r = bounce_report(&v).unwrap();
+        assert_eq!(r.seconds, 55.884);
+        assert_eq!(r.lufs, -15.12350845336914);
+        assert_eq!(r.peak_db, -0.10000041872262955);
+        assert_eq!(r.true_peak_db, -0.0775223821401596);
+
+        let mut broken = v.clone();
+        broken.as_object_mut().unwrap().remove("lufs");
+        let err = bounce_report(&broken).unwrap_err().to_string();
+        assert!(err.contains("«lufs»"), "текст: {err}");
     }
 }

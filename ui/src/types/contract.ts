@@ -1,13 +1,16 @@
 /**
- * IPC-контракт: кокпит ↔ ядро — TS-зеркало docs/ipc-contract.md **v0.2**.
+ * IPC-контракт: кокпит ↔ ядро — TS-зеркало docs/ipc-contract.md **v0.2.1**.
  * Единственное место типов между React-фронтом и Rust-ядром; Rust-сторона —
  * crates/l2t-core/src/contract.rs (serde). Ручная синхронизация до v1:
  * расхождение сторон = баг. Изменения схемы — только bump версии контракта
- * + строка в «ПРЕДЛОЖЕНИЯ ДЕТЕЙ» + согласие L2T team.
+ * + согласие L2T team (предложение и вердикт — в журнале проекта).
  *
  * v0.2 (вердикты C1–C6): + adopt_loop (C1), конвенция превью-WAV (C2,
  * константа PREVIEW_WAV), analyze_loop.copy_into_workspace (C5),
  * BusState.session_name (C6); daw.render/cancel/транспорт — отложены (⏸).
+ *
+ * v0.2.1 (Mastering Targets v0): + export_track с целью громкости
+ * (закрывает C3 — рендер идёт через export_track).
  */
 
 // ─── Данные ────────────────────────────────────────────────────────────────
@@ -124,6 +127,55 @@ export interface AdoptLoopInput {
 export interface AdoptLoopOutput {
   tempo: number;
   marker: string;
+}
+
+/**
+ * v0.2.1 (Mastering Targets v0): цель громкости экспорта. "none" — без
+ * мастеринга; "spotify" −14 / "apple" −16 LUFS — нормализация платформ.
+ */
+export type MasterTarget = "none" | "spotify" | "apple";
+
+/** v0.2.1: вход export_track — рендер микса движком в WAV. */
+export interface ExportTrackInput {
+  /** Внутри workspace движка; по умолчанию `<workspace>/export/l2t-export-<время>.wav`. */
+  output_path?: string;
+  /** По умолчанию "none". */
+  target?: MasterTarget;
+}
+
+/** v0.2.1: что применено к рендеру ради цели ("normalize" — пик −0.1 dBFS). */
+export type MasteringApplied = "none" | "normalize";
+
+/**
+ * v0.2.1: on_target — в пределах ±1 LU; below_target — нужен лимитер;
+ * above_target — нужно ослабление; silent — громкости нет.
+ */
+export type MasteringVerdict = "on_target" | "below_target" | "above_target" | "silent";
+
+/** v0.2.1: кто измерил achieved_lufs — analyzer (повторный замер) или движок. */
+export type LoudnessSource = "analyzer" | "engine";
+
+/** v0.2.1: дистанция до цели — числа честные, цель не гарантирована. */
+export interface MasteringReport {
+  target_lufs: number;
+  applied: MasteringApplied;
+  achieved_lufs: number;
+  /** target_lufs − achieved_lufs: > 0 — тише цели, < 0 — громче. */
+  delta: number;
+  verdict: MasteringVerdict;
+  measured_by: LoudnessSource;
+}
+
+/** v0.2.1: выход export_track — отчёт движка о финальном файле и блок цели. */
+export interface ExportTrackOutput {
+  path: string;
+  seconds: number;
+  lufs: number;
+  peak_db: number;
+  true_peak_db: number;
+  target: MasterTarget;
+  /** null, если target = "none". */
+  mastering: MasteringReport | null;
 }
 
 /**

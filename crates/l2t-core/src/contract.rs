@@ -1,8 +1,7 @@
-//! Rust-реализация ipc-контракта v0.1 (docs/ipc-contract.md) — serde-типы
+//! Rust-реализация ipc-контракта (docs/ipc-contract.md) — serde-типы
 //! команд, событий и данных. Это зеркало контракта, НЕ источник: любое
-//! изменение схемы = bump версии контракта + предложение в память +
-//! согласие Папы; TS-сторона (ui/src/types/contract.ts) синхронизируется
-//! тем же коммитом.
+//! изменение схемы = bump версии контракта + согласие мейнтейнера;
+//! TS-сторона (ui/src/types/contract.ts) синхронизируется тем же коммитом.
 //!
 //! Формат нот — только core/midi_io (`{note, start, end, velocity,
 //! channel}`, тики, каналы 0-indexed; см. notes.rs — порт load_notes).
@@ -147,6 +146,114 @@ pub struct SelfCheckReport {
     pub verdict: String,
 }
 
+// ------------------------------------------------- Mastering Targets v0 ----
+
+/// Цель громкости экспорта (v0.2.1): нормализация стриминговых платформ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MasterTarget {
+    /// Без цели: bounce уходит как есть.
+    #[serde(rename = "none")]
+    Bypass,
+    #[serde(rename = "spotify")]
+    Spotify,
+    #[serde(rename = "apple")]
+    Apple,
+}
+
+/// Нормализация громкости Spotify, LUFS.
+pub const SPOTIFY_LUFS: f64 = -14.0;
+/// Нормализация громкости Apple Music (Sound Check), LUFS.
+pub const APPLE_LUFS: f64 = -16.0;
+/// Допуск вердикта `on_target`, LU.
+pub const ON_TARGET_LU: f64 = 1.0;
+/// Гейт EBU R128: тише этой громкости измеримой громкости нет.
+pub const SILENCE_LUFS: f64 = -70.0;
+
+impl MasterTarget {
+    /// Имя цели на проводе (оно же — часть имени файла экспорта).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bypass => "none",
+            Self::Spotify => "spotify",
+            Self::Apple => "apple",
+        }
+    }
+
+    /// Целевая громкость, LUFS; `None` — цель не задана.
+    pub fn target_lufs(self) -> Option<f64> {
+        match self {
+            Self::Bypass => None,
+            Self::Spotify => Some(SPOTIFY_LUFS),
+            Self::Apple => Some(APPLE_LUFS),
+        }
+    }
+}
+
+/// Что применено к bounce ради цели (`MasteringReport.applied`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MasteringApplied {
+    /// Ничего: цели нет, либо сырой bounce уже ближе к ней.
+    #[serde(rename = "none")]
+    Untouched,
+    /// Peak-normalize движком до −0.1 dBFS.
+    #[serde(rename = "normalize")]
+    Normalized,
+}
+
+/// Вердикт по цели (`MasteringReport.verdict`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MasteringVerdict {
+    /// В пределах `ON_TARGET_LU`.
+    OnTarget,
+    /// Тише цели: пик уже на потолке, чистым гейном дальше нельзя — нужна
+    /// компрессия или лимитер.
+    BelowTarget,
+    /// Громче цели: нужно ослабление, а офлайн-этап v0 умеет только
+    /// нормализацию по пику.
+    AboveTarget,
+    /// Громкости нет (тише гейта EBU R128) — цель неприменима.
+    Silent,
+}
+
+/// Кто измерил `MasteringReport.achieved_lufs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LoudnessSource {
+    Analyzer,
+    Engine,
+}
+
+/// Отчёт о целевой громкости экспорта. Числа честные: движок не
+/// нормализует до LUFS, только по пику, поэтому `delta` — расстояние до
+/// цели, а не признак сбоя.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MasteringReport {
+    pub target_lufs: f64,
+    pub applied: MasteringApplied,
+    /// Громкость финального файла: повторный замер analyzer, а если его
+    /// слот не жив — отчёт движка (см. `measured_by`).
+    pub achieved_lufs: f64,
+    /// `target_lufs − achieved_lufs`: больше нуля — тише цели, меньше — громче.
+    pub delta: f64,
+    pub verdict: MasteringVerdict,
+    pub measured_by: LoudnessSource,
+}
+
+/// Выход `export_track`: отчёт движка о финальном файле и блок цели.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExportTrackOutput {
+    pub path: String,
+    pub seconds: f64,
+    pub lufs: f64,
+    pub peak_db: f64,
+    pub true_peak_db: f64,
+    /// Цель экспорта; `none` — без мастеринга.
+    pub target: MasterTarget,
+    /// `None`, если `target` = `none` (ключ на проводе есть всегда).
+    pub mastering: Option<MasteringReport>,
+}
+
 // Входы команд — имена полей 1:1 с TS-зеркалом (ui/src/types/contract.ts,
 // `*Input`), snake_case. На проводе Tauri-адаптер передаёт вход одним
 // объектом: `invoke("<command>", { input })` — команды принимают `input`.
@@ -193,6 +300,18 @@ pub struct AdoptLoopParams {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RunSelfCheckInput {
     pub bounce_path: String,
+}
+
+/// Вход `export_track` (v0.2.1).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ExportTrackInput {
+    /// Путь WAV внутри workspace движка; по умолчанию ядро назначает
+    /// `<export-dir>/l2t-export-<время>.wav`.
+    #[serde(default)]
+    pub output_path: Option<String>,
+    /// Цель громкости; по умолчанию `none`.
+    #[serde(default)]
+    pub target: Option<MasterTarget>,
 }
 
 // --------------------------------------------------------------- события ----
@@ -354,5 +473,87 @@ mod tests {
         let v = serde_json::to_value(AdoptResult { tempo: 94.0, marker: "Key: D minor".into() })
             .unwrap();
         assert_eq!(v, serde_json::json!({"tempo": 94.0, "marker": "Key: D minor"}));
+    }
+
+    /// v0.2.1: цели на проводе — те же строки, что в TS-зеркале, у каждой
+    /// ровно одна LUFS-константа.
+    #[test]
+    fn master_targets_roundtrip_with_lufs() {
+        for (wire, lufs) in [
+            ("none", None),
+            ("spotify", Some(-14.0)),
+            ("apple", Some(-16.0)),
+        ] {
+            let t: MasterTarget = serde_json::from_value(serde_json::json!(wire)).unwrap();
+            assert_eq!(serde_json::to_value(t).unwrap(), serde_json::json!(wire));
+            assert_eq!(t.target_lufs(), lufs);
+            assert_eq!(t.as_str(), wire);
+        }
+        // неизвестная цель — ошибка десериализации, а не молчаливый none
+        assert!(serde_json::from_value::<MasterTarget>(serde_json::json!("tidal")).is_err());
+    }
+
+    /// v0.2.1: вход export_track читается и из пустого input (все поля
+    /// опциональны), и из полной формы адаптера.
+    #[test]
+    fn export_track_input_defaults_and_full_form() {
+        let x: ExportTrackInput = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!((x.output_path.clone(), x.target), (None, None));
+
+        let x: ExportTrackInput = serde_json::from_value(serde_json::json!({
+            "output_path": "/ws/export/track.wav", "target": "spotify"
+        }))
+        .unwrap();
+        assert_eq!(x.output_path.as_deref(), Some("/ws/export/track.wav"));
+        assert_eq!(x.target, Some(MasterTarget::Spotify));
+    }
+
+    /// v0.2.1: выход export_track — форма TS-зеркала `ExportTrackOutput`;
+    /// без цели `mastering` = null, но ключ на проводе есть.
+    #[test]
+    fn export_track_output_serializes_like_ts_mirror() {
+        let plain = ExportTrackOutput {
+            path: "/ws/export/a.wav".into(),
+            seconds: 55.884,
+            lufs: -19.37,
+            peak_db: -4.35,
+            true_peak_db: -4.32,
+            target: MasterTarget::Bypass,
+            mastering: None,
+        };
+        let v = serde_json::to_value(&plain).unwrap();
+        assert_eq!(
+            v.as_object().map(|o| o.len()),
+            Some(7),
+            "путь + отчёт движка (4) + target + mastering: {v}"
+        );
+        assert_eq!(v["target"], serde_json::json!("none"));
+        assert!(v.get("mastering").is_some() && v["mastering"].is_null());
+
+        let mastered = ExportTrackOutput {
+            target: MasterTarget::Spotify,
+            mastering: Some(MasteringReport {
+                target_lufs: SPOTIFY_LUFS,
+                applied: MasteringApplied::Normalized,
+                achieved_lufs: -15.1,
+                delta: 1.1,
+                verdict: MasteringVerdict::BelowTarget,
+                measured_by: LoudnessSource::Analyzer,
+            }),
+            ..plain.clone()
+        };
+        let v = serde_json::to_value(&mastered).unwrap();
+        assert_eq!(v["target"], serde_json::json!("spotify"));
+        assert_eq!(
+            v["mastering"],
+            serde_json::json!({
+                "target_lufs": -14.0,
+                "applied": "normalize",
+                "achieved_lufs": -15.1,
+                "delta": 1.1,
+                "verdict": "below_target",
+                "measured_by": "analyzer",
+            })
+        );
     }
 }

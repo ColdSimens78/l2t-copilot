@@ -11,7 +11,10 @@ use std::time::Duration;
 
 use l2t_core::bus::BusServer;
 use l2t_core::config::{resolve_audio_analyzer, resolve_midi_gen, resolve_soundcraft, ServerConfig};
-use l2t_core::contract::{Part, SuggestionStatus};
+use l2t_core::contract::{
+    LoudnessSource, MasteringApplied, MasteringVerdict, MasterTarget, Part, SuggestionStatus,
+    SPOTIFY_LUFS,
+};
 use l2t_core::error::CoreError;
 use l2t_core::CockpitCore;
 use serde_json::json;
@@ -367,6 +370,189 @@ async fn full_pipeline_on_ratified_engine() {
     assert!(!xray_ref.key.is_empty());
     let check = core.run_self_check(&bounce).await.expect("self check");
     assert_eq!(check.verdict, "ok"); // тот же файл — тривиально ok
+    core.shutdown().await;
+}
+
+/// **Mastering Targets v0** (контракт v0.2.1): демо-сессия движка →
+/// `export_track` с целью → normalize по пику → повторный замер analyzer.
+/// Критерий: измеренная громкость в окне цели Spotify (|LUFS + 14| < 1.5),
+/// показания движка и analyzer согласованы, пик на безопасном потолке;
+/// сессия не меняется, эталон Self-Check не затирается замером экспорта.
+#[tokio::test]
+async fn export_track_hits_mastering_target_on_demo_session() {
+    let engine_bin = resolve_soundcraft().command;
+    let an_cfg = resolve_audio_analyzer();
+    if !engine_bin.is_file() || !an_cfg.command.is_file() {
+        eprintln!("SKIP: soundcraft-cli или audio-analyzer не найдены");
+        return;
+    }
+    let ws = tempfile_staging("master");
+    std::fs::create_dir_all(&ws).unwrap();
+    let roots = ws.display().to_string();
+    let engine_cfg = ServerConfig {
+        name: "soundcraft",
+        command: engine_bin.clone(),
+        args: vec![
+            "mcp".into(),
+            "--demo".into(),
+            "--automation-read-root".into(),
+            roots.clone(),
+            "--automation-write-root".into(),
+            roots.clone(),
+        ],
+        env: HashMap::new(),
+    };
+    let broken_midi = ServerConfig {
+        name: "midi-gen",
+        command: PathBuf::from("/nonexistent/l2t-midi-gen"),
+        args: vec![],
+        env: HashMap::new(),
+    };
+    let mut core = CockpitCore::connect_in(an_cfg, broken_midi, ws.join("staging")).await;
+    core.attach_engine(engine_cfg)
+        .await
+        .expect("движок подключается");
+
+    // демо-сессия подгружается после initialize: ждём треки, иначе bounce пуст
+    let mut tracks = 0;
+    for _ in 0..100 {
+        tracks = core.get_bus_state().await.tracks.len();
+        if tracks > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(tracks > 0, "демо-сессия движка не загрузилась");
+    let tracks_before = serde_json::to_value(core.get_bus_state().await).unwrap()["tracks"].clone();
+
+    // эталон Self-Check — синус (−9.5 LUFS): замер экспорта его не подменяет
+    let sine = ws.join("ref-sine.wav");
+    write_sine_wav(&sine);
+    let reference = core.analyze_loop(&sine).await.expect("X-Ray эталона");
+
+    // цель Spotify: normalize по пику + независимый замер analyzer
+    let export_dir = ws.join("export");
+    let out = export_dir.join("spotify.wav");
+    let res = core
+        .export_track(Some(&out), MasterTarget::Spotify)
+        .await
+        .expect("export с целью");
+    assert!(out.is_file(), "файл экспорта существует: {}", res.path);
+    assert_eq!(res.target, MasterTarget::Spotify);
+    assert_eq!(res.path, out.display().to_string());
+    let m = res.mastering.as_ref().expect("блок mastering при цели");
+    assert_eq!(
+        (m.applied, m.measured_by),
+        (MasteringApplied::Normalized, LoudnessSource::Analyzer)
+    );
+    assert_eq!(m.target_lufs, SPOTIFY_LUFS);
+    // критерий: |LUFS − (−14)| < 1.5
+    assert!(
+        (m.achieved_lufs - SPOTIFY_LUFS).abs() < 1.5,
+        "achieved {} LUFS — вне окна цели: {m:?}",
+        m.achieved_lufs
+    );
+    // движок и analyzer меряют один файл согласованно; пик — на потолке
+    assert!(
+        (res.lufs - m.achieved_lufs).abs() < 0.5,
+        "движок {} LUFS vs analyzer {}",
+        res.lufs,
+        m.achieved_lufs
+    );
+    assert!(
+        (res.peak_db + 0.1).abs() < 0.05,
+        "пик после normalize: {}",
+        res.peak_db
+    );
+    assert!(
+        (m.delta - (SPOTIFY_LUFS - m.achieved_lufs)).abs() < 0.02,
+        "дельта: {}",
+        m.delta
+    );
+    // промежуточного сырого bounce не осталось
+    let leftovers: Vec<String> = std::fs::read_dir(&export_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("l2t-raw"))
+        .map(|e| e.path().display().to_string())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "остался промежуточный файл: {leftovers:?}"
+    );
+
+    // сессия движка не изменилась, эталон Self-Check жив (иначе дельта ≈ 0)
+    let tracks_after = serde_json::to_value(core.get_bus_state().await).unwrap()["tracks"].clone();
+    assert_eq!(tracks_before, tracks_after, "экспорт меняет сессию");
+    let check = core
+        .run_self_check(&out)
+        .await
+        .expect("Self-Check на экспорте");
+    assert!(
+        (check.lufs_delta - (res.lufs - reference.lufs)).abs() < 0.6,
+        "lufs_delta {} — эталон подменён? (ожидалось ≈ {})",
+        check.lufs_delta,
+        res.lufs - reference.lufs
+    );
+
+    // без цели — bounce как есть, блока mastering нет
+    let plain = export_dir.join("plain.wav");
+    let res_plain = core
+        .export_track(Some(&plain), MasterTarget::Bypass)
+        .await
+        .expect("export без цели");
+    assert!(plain.is_file());
+    assert_eq!(res_plain.target, MasterTarget::Bypass);
+    assert!(res_plain.mastering.is_none());
+    assert!(
+        res_plain.lufs < res.lufs - 2.0,
+        "сырой {} LUFS должен быть тише нормализованного {}",
+        res_plain.lufs,
+        res.lufs
+    );
+
+    // путь вне песочницы движка — bounded-ошибка, ничего не записано
+    let outside = Path::new("/tmp/l2t-outside-root.wav");
+    let err = core
+        .export_track(Some(outside), MasterTarget::Spotify)
+        .await
+        .expect_err("путь вне automation-roots обязан отвергаться");
+    assert!(
+        err.to_string().contains("automation path rejected"),
+        "текст: {err}"
+    );
+    assert!(!outside.exists());
+
+    // пустая сессия: громкости нет — честный silent, без второй отрисовки
+    let empty_engine = ServerConfig {
+        name: "soundcraft",
+        command: engine_bin,
+        args: vec![
+            "mcp".into(),
+            "--automation-read-root".into(),
+            roots.clone(),
+            "--automation-write-root".into(),
+            roots,
+        ],
+        env: HashMap::new(),
+    };
+    core.attach_engine(empty_engine)
+        .await
+        .expect("пустой движок");
+    let empty = export_dir.join("empty.wav");
+    let res_empty = core
+        .export_track(Some(&empty), MasterTarget::Apple)
+        .await
+        .expect("export пустой сессии");
+    assert!(empty.is_file());
+    let m = res_empty
+        .mastering
+        .as_ref()
+        .expect("блок mastering при цели");
+    assert_eq!(
+        (m.applied, m.verdict),
+        (MasteringApplied::Untouched, MasteringVerdict::Silent)
+    );
     core.shutdown().await;
 }
 

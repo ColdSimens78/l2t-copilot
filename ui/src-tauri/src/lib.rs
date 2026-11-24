@@ -14,8 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use l2t_core::contract::{
     AcceptResult, AdoptLoopParams, AdoptResult, AnalyzeLoopInput, BusState, EngineState,
-    GeneratePartParams, HostStatus, PartVersion, RegenerateParams, RunSelfCheckInput,
-    SelfCheckReport, Suggestion, SuggestionUpdated, XRayReport,
+    ExportTrackInput, ExportTrackOutput, GeneratePartParams, HostStatus, MasterTarget,
+    PartVersion, RegenerateParams, RunSelfCheckInput, SelfCheckReport, Suggestion,
+    SuggestionUpdated, XRayReport,
 };
 use l2t_core::CockpitCore;
 use serde_json::Value;
@@ -185,6 +186,28 @@ async fn render_preview(mid_path: String) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// «Save WAV» из окна (принцип владельца: трек уходит напрямую из
+/// приложения): bounce движка в путь экспорта (default: workspace/export,
+/// env L2T_EXPORT_DIR). С целью громкости — Mastering Targets v0
+/// (контракт v0.2.1): normalize по пику + честный отчёт о дистанции до цели.
+#[tauri::command]
+async fn export_track(
+    app: AppHandle,
+    core: State<'_, Mutex<CockpitCore>>,
+    input: ExportTrackInput,
+) -> Result<ExportTrackOutput, String> {
+    let mut core = core.lock().await;
+    let result = core
+        .export_track(
+            input.output_path.as_deref().map(std::path::Path::new),
+            input.target.unwrap_or(MasterTarget::Bypass),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    emit_bus_log(&app, &mut core);
+    Ok(result)
+}
+
 /// adopt_loop (C1, контракт v0.2): BPM+key лупа → сессия движка
 /// (event.tempo + key-маркер «Key: <тоналность>»).
 #[tauri::command]
@@ -229,16 +252,19 @@ static E2E_DONE: AtomicBool = AtomicBool::new(false);
 fn e2e_js() -> Option<String> {
     // CC0-лупы OSS-разведки; берём первый найденный FLAC
     let examples = PathBuf::from("/home/ilmir/l2t-copilot/examples");
-    let loop_wav = std::fs::read_dir(&examples)
+    let mut flacs: Vec<PathBuf> = std::fs::read_dir(&examples)
         .ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .find(|p| p.extension().is_some_and(|x| x == "flac"))?;
+        .filter(|p| p.extension().is_some_and(|x| x == "flac"))
+        .collect();
+    flacs.sort();
+    // fixture e2e по отчёту: emotional_piano (рубато — проверка округления bpm)
+    let loop_wav = match flacs.iter().find(|p| p.to_string_lossy().contains("emotional_piano")) {
+        Some(p) => p.clone(),
+        None => flacs.into_iter().next()?,
+    };
     let loop_path = loop_wav.display().to_string().replace('\'', "");
-    // bounce пишется в workspace движка (roots пресета)
-    let bounce_path = std::env::var("L2T_SOUNDCRAFT_WORKSPACE")
-        .unwrap_or_else(|_| l2t_core::config::SOUNDCRAFT_WORKSPACE.into())
-        + "/bounce_e2e.wav";
     Some(format!(
         r#"(async () => {{
   const t = window.__TAURI__;
@@ -263,9 +289,17 @@ fn e2e_js() -> Option<String> {
     await say('e2e_preview', wav);
     const acc = await invoke('accept_part', {{ input: {{ part: 'bass', version: s.version }} }});
     await say('e2e_accept', JSON.stringify(acc));
-    const bounce = await invoke('bounce', {{ path: '{bounce_path}' }});
-    await say('e2e_bounce', JSON.stringify(bounce));
-    const check = await invoke('run_self_check', {{ input: {{ bounce_path: '{bounce_path}' }} }});
+    // verify в session.inspect: треки/клипы сессии после accept
+    const insp = await invoke('get_bus_state');
+    await say('e2e_inspect', JSON.stringify(insp.tracks.map(t => ({{ name: t.name, kind: t.kind, clips: (t.clips || []).map(c => c.notes) }}))));
+    // «Save WAV»: экспорт сессии движком (default: workspace/export)
+    const exp = await invoke('export_track', {{ input: {{}} }});
+    await say('e2e_export', JSON.stringify(exp));
+    // Mastering Targets v0: цель Spotify −14 LUFS (normalize движком + замер analyzer)
+    const mastered = await invoke('export_track', {{ input: {{ target: 'spotify' }} }});
+    await say('e2e_mastering', JSON.stringify(mastered.mastering));
+    // Self-Check на ЭКСПОРТЕ (файл в workspace — правило 1 соблюдено)
+    const check = await invoke('run_self_check', {{ input: {{ bounce_path: exp.path }} }});
     await say('e2e_selfcheck', JSON.stringify(check));
     await say('e2e_done', 'ok');
   }} catch (e) {{
@@ -273,7 +307,6 @@ fn e2e_js() -> Option<String> {
   }}
 }})();"#,
         loop_path = loop_path,
-        bounce_path = bounce_path,
     ))
 }
 
@@ -323,7 +356,8 @@ pub fn run() {
             run_self_check,
             render_preview,
             adopt_loop,
-            bounce
+            bounce,
+            export_track
         ])
         .setup(|app| {
             // Поднять шину: analyzer + midi-gen + ратифицированный движок
