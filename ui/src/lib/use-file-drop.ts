@@ -9,12 +9,23 @@
  */
 import { useEffect, useRef, useState, type DragEvent, type RefObject } from "react";
 
-import { useApi, type CockpitApi, type FileDropEvent, type Unsubscribe } from "@/ipc/api";
+import { adapterMode, useApi, type CockpitApi, type FileDropEvent, type Unsubscribe } from "@/ipc/api";
+import { mockAdapter } from "@/ipc/mock-adapter";
 
 export interface DroppedFile {
   /** Абсолютный путь (окно) либо текст dataTransfer; null, если среда дала только имя. */
   path: string | null;
   name: string | null;
+}
+
+/**
+ * Путь из drop для команды ядра: в окне он абсолютный; в браузере у File
+ * пути нет — мок строит его по имени; вне песочницы ядро предложит копию (C5).
+ */
+export function resolveDropPath(file: DroppedFile): string | null {
+  if (file.path) return file.path;
+  if (file.name && adapterMode === "mock") return mockAdapter.demoPath(file.name);
+  return null;
 }
 
 interface Zone {

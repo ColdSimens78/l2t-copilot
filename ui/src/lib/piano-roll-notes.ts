@@ -41,3 +41,28 @@ export function ghostNotes(s: Suggestion): Note[] {
 export function isGhost(note: Note): boolean {
   return typeof note.id === "string" && note.id.startsWith("ghost:");
 }
+
+/** Такт 4/4 в тиках (16 шестнадцатых по 120). */
+export const TICKS_PER_BAR = UNITS_PER_BAR * TICKS_PER_UNIT;
+
+export interface PreviewShape {
+  /** Диапазон высот партии — строки мини-превью. */
+  minPitch: number;
+  maxPitch: number;
+  /** Длина превью в тактах: целый ряд, чтобы сетка была ровной. */
+  bars: number;
+}
+
+/** Геометрия мини-превью (GhostPreview): высоты и длина в тактах; null — нот нет. */
+export function previewShape(notes: MidiNote[]): PreviewShape | null {
+  if (notes.length === 0) return null;
+  let minPitch = Infinity;
+  let maxPitch = -Infinity;
+  let end = 0;
+  for (const n of notes) {
+    if (n.note < minPitch) minPitch = n.note;
+    if (n.note > maxPitch) maxPitch = n.note;
+    if (n.end > end) end = n.end;
+  }
+  return { minPitch, maxPitch, bars: Math.max(1, Math.ceil(end / TICKS_PER_BAR)) };
+}

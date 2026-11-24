@@ -18,7 +18,8 @@
  * - прогрев движка ~8 с при wake (урок PoC — имитируем 3 с).
  *
  * Симулятор сбоев (faults) — тестовый инструмент дев-харнесса: включается
- * из консоли браузера (`mockAdapter.setFault(...)`), на живое ядро не влияет.
+ * из консоли браузера (`window.__l2tMock.setFault(...)` — тот же экземпляр,
+ * что и у приложения, в т.ч. после hot-reload), на живое ядро не влияет.
  */
 import type {
   BusLogEvent,
@@ -128,7 +129,7 @@ function toolOf(command: string): string {
   return "midi-gen";
 }
 
-/** Прогон «вызова шины»: fault снимается с очереди и уходит в work одним кадром с ним. */
+/** Прогон «вызова шины»: fault снимается с очереди первым же вызовом. */
 async function runCommand<T>(command: string, work: (fault: FaultKind) => Promise<T>): Promise<T> {
   const fault = state.fault;
   state.fault = "none";
@@ -138,13 +139,14 @@ async function runCommand<T>(command: string, work: (fault: FaultKind) => Promis
     await delay(1000); // ядро «потеряло ответ», но операция прошла
     return work("none");
   }
-  const result = await work(fault);
-  const ms = Date.now() - t0;
   if (fault === "error_on_next") {
-    emitBusLog(toolOf(command), command, "error", ms);
-    throw new Error(`JSON-RPC error: симуляция сбоя сервера (mockAdapter.setFault)`);
+    // сервер упал до того, что-либо сделал: состояние ядра не меняется
+    await delay(300);
+    emitBusLog(toolOf(command), command, "error", Date.now() - t0);
+    throw new Error("JSON-RPC error: симуляция сбоя сервера (mockAdapter.setFault)");
   }
-  emitBusLog(toolOf(command), command, "ok", ms);
+  const result = await work(fault);
+  emitBusLog(toolOf(command), command, "ok", Date.now() - t0);
   return result;
 }
 

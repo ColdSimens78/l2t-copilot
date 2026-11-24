@@ -89,6 +89,13 @@ export const adapterMode: "mock" | "tauri" = isTauri ? "tauri" : "mock";
 
 export const currentAdapter: CockpitApi = isTauri ? tauriAdapter : mockAdapter;
 
+// Дев-харнесс: симулятор сбоев мока доступен из консоли тем же экземпляром,
+// что работает в приложении (после hot-reload у модуля новый URL — прямой
+// import из консоли дал бы второй экземпляр). В окне Tauri переменной нет.
+if (!isTauri) {
+  (window as { __l2tMock?: typeof mockAdapter }).__l2tMock = mockAdapter;
+}
+
 /** Контекст для компонентов. Провайдер — в store/cockpit.tsx. */
 import { createContext, useContext } from "react";
 export const ApiContext = createContext<CockpitApi>(currentAdapter);

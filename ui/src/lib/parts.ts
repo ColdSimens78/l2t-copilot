@@ -229,3 +229,26 @@ export function paramDiff(
   }
   return { diff, label: label.join(", "), keys };
 }
+
+/**
+ * Видимый diff двух версий партии — «style: basic → syncopated»: что
+ * изменилось в чипах и контексте (bpm/key) между соседними версиями.
+ */
+export function versionDiff(
+  part: PartId,
+  before: Record<string, unknown> | undefined,
+  after: Record<string, unknown> | undefined,
+): string {
+  const b = chipParams(part, before);
+  const a = chipParams(part, after);
+  const label: string[] = [];
+  for (const key of Object.keys(a)) {
+    if (b[key] !== a[key]) label.push(`${key}: ${String(b[key])} → ${String(a[key])}`);
+  }
+  for (const key of part === "drums" ? ["bpm"] : ["bpm", "key"]) {
+    if (String(before?.[key]) !== String(after?.[key])) {
+      label.push(`${key}: ${before?.[key] ?? "—"} → ${after?.[key] ?? "—"}`);
+    }
+  }
+  return label.join(", ");
+}

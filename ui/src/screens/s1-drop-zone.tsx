@@ -10,21 +10,13 @@
 import { useCallback, useRef } from "react";
 
 import { adapterMode } from "@/ipc/api";
-import { mockAdapter } from "@/ipc/mock-adapter";
 import { useCockpit } from "@/store/cockpit";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { useFileDrop, type DroppedFile } from "@/lib/use-file-drop";
+import { resolveDropPath, useFileDrop, type DroppedFile } from "@/lib/use-file-drop";
 
 const DEMO_LOOP = "/home/ilmir/music-workspace/loop_am90.wav";
 const OUTSIDE_LOOP = "/home/ilmir/Downloads/loop_am90.wav";
-
-/** Путь из drop: в окне он абсолютный; в браузере у File пути нет — мок строит его по имени. */
-function resolvePath(file: DroppedFile): string | null {
-  if (file.path) return file.path;
-  if (file.name && adapterMode === "mock") return mockAdapter.demoPath(file.name);
-  return null;
-}
 
 export function DropZone() {
   const { analyzing, xrayError, analyzeLoop, retryAnalyze, dismissXrayError } = useCockpit();
@@ -32,7 +24,7 @@ export function DropZone() {
 
   const drop = useCallback(
     (file: DroppedFile) => {
-      const path = resolvePath(file);
+      const path = resolveDropPath(file);
       if (path) void analyzeLoop(path);
     },
     [analyzeLoop],
