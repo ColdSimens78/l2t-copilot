@@ -2,6 +2,13 @@
 
 [![CI](https://github.com/ColdSimens78/l2t-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/ColdSimens78/l2t-copilot/actions/workflows/ci.yml)
 
+> **🤖 100% кода этого репозитория написано AI-агентами.**
+> Человек задаёт видение и принимает решения; команда из пяти агентных
+> ролей (Lead, Desktop Engineer, Frontend Engineer, OSS Scout, UX Architect)
+> исследует, специфицирует, кодит, тестирует и документирует — под
+> обязательным ревью каждого коммита. Методология и цифры за 3 дня:
+> **[docs/ai-development.md](docs/ai-development.md)**
+
 **AI-нативный кокпит для музыканта: десктоп-приложение, которое превращает
 найденный аудио-луп в законченный, полностью редактируемый трек.**
 
