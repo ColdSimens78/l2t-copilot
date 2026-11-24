@@ -1,12 +1,14 @@
 /**
  * CockpitApi — ЕДИНСТВЕННЫЙ интерфейс UI↔ядро (зеркало docs/ipc-contract.md
- * v0.2, раздел Commands/Events). Фронт не знает ни MCP, ни транспорт:
+ * v0.2.1, раздел Commands/Events). Фронт не знает ни MCP, ни транспорт:
  * переключение mock ↔ Tauri — ОДНА строка в `currentAdapter` ниже.
  *
  * Правила спеки, которые живёт здесь:
  * - pending-строки AI Dock рисует store локально с момента вызова
  *   (bus_log не имеет статуса «start», спека §3);
  * - таймаут ≠ отказ: ядро само делает inspect — UI не ретраит (спека §0.6);
+ * - рендер микса — только контрактный export_track (v0.2.1): он же путь
+ *   «normalize до цели» в Self-Check (C3 закрыт);
  * - никакого прямого доступа к MCP из компонентов.
  */
 import type {
@@ -14,11 +16,13 @@ import type {
   AdoptLoopInput,
   AdoptLoopOutput,
   AnalyzeLoopInput,
-  BounceResult,
   BusLogEvent,
   BusState,
+  ExportTrackInput,
+  ExportTrackOutput,
   GeneratePartInput,
   HostStatusEvent,
+  PartId,
   PartVersionInput,
   RegenerateInput,
   RunSelfCheckInput,
@@ -51,11 +55,8 @@ export interface CockpitApi {
   adoptLoop(input: AdoptLoopInput): Promise<AdoptLoopOutput>;
   getBusState(): Promise<BusState>;
   runSelfCheck(input: RunSelfCheckInput): Promise<SelfCheckReport>;
-  /**
-   * Вне таблицы v0.2 (C3 ⏸): рендер микса движком в WAV по пути внутри
-   * песочницы. undefined — среда рендерить не умеет (UI кнопку не показывает).
-   */
-  bounce?(path: string): Promise<BounceResult>;
+  /** v0.2.1: рендер микса движком в WAV внутри песочницы — с целью громкости или без. */
+  exportTrack(input: ExportTrackInput): Promise<ExportTrackOutput>;
 
   // ── Events (ядро → UI) ──
   onBusLog(handler: (event: BusLogEvent) => void): Unsubscribe;
@@ -66,6 +67,12 @@ export interface CockpitApi {
   readonly dropMode: DropMode;
   /** Только при dropMode «tauri»: нативное событие tauri://drag-drop всего окна. */
   onFileDrop?(handler: (event: FileDropEvent) => void): Unsubscribe;
+  /**
+   * C2 (конвенция staging/<part>_v<N>.wav): превью партии как URL для HTML
+   * audio. null — рендер ещё не готов; undefined — среда не отдаёт файлы
+   * наружу (окно без доступа к файловой системе): кнопка [▶] выключена.
+   */
+  previewUrl?(part: PartId, version: number): string | null;
 }
 
 // ─── Переключение адаптеров: авто-детект среды ────────────────────────────

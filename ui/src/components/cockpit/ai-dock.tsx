@@ -15,7 +15,7 @@ const LONG_PENDING = 10_000;
 
 export function AiDock() {
   const { dockPending, dockLine, dockBackground, dismissDock } = useCockpit();
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(() => Date.now());
 
   // перерисовка раз в секунду: pending старше 10 с остаётся в dock до итога
   useEffect(() => {

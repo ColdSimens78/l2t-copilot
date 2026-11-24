@@ -3,10 +3,10 @@
  * (invoke команд ядра + listen событий). Экраны не меняются при переходе
  * на мок и обратно.
  *
- * Имена команд ядра — в точности ipc-contract v0.2:
+ * Имена команд ядра — в точности ipc-contract v0.2.1:
  * analyze_loop / generate_part / regenerate / accept_part / reject_part /
- * adopt_loop / get_bus_state / run_self_check; события — bus_log /
- * suggestion_updated / host_status (сверено с шеллом).
+ * adopt_loop / get_bus_state / run_self_check / export_track; события —
+ * bus_log / suggestion_updated / host_status (сверено с шеллом).
  *
  * Провод: вход команды уходит одним объектом `input`, поля внутри —
  * snake_case, 1:1 с `*Input` зеркала контракта. Стороны сходятся на этой
@@ -15,9 +15,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
-  BounceResult,
   BusLogEvent,
   BusState,
+  ExportTrackOutput,
   HostStatusEvent,
   SelfCheckReport,
   Suggestion,
@@ -97,11 +97,12 @@ export const tauriAdapter: CockpitApi = {
   async runSelfCheck(input) {
     return invoke<SelfCheckReport>("run_self_check", { input });
   },
-  // Вне контракта v0.2: команда шелла `bounce` принимает путь отдельным
-  // аргументом (camelCase от path = path), нормализации у движка нет.
-  bounce(path) {
-    return invoke<BounceResult>("bounce", { path });
+  // v0.2.1: тот же вход одним объектом `input`, что и остальные команды.
+  async exportTrack(input) {
+    return invoke<ExportTrackOutput>("export_track", { input });
   },
+  // previewUrl не реализован: окно пока не умеет читать файлы песочницы
+  // (ни asset-протокола, ни команды чтения) — [▶] честно выключен.
 
   onBusLog(handler): Unsubscribe {
     return subscribe<BusLogEvent>(EV.busLog, handler);

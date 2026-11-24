@@ -72,8 +72,11 @@ export function useFileDrop(
 ) {
   const api = useApi();
   const [dragOver, setDragOver] = useState(false);
+  // свежий onDrop для слушателей, подписанных один раз на адаптер
   const dropRef = useRef(onDrop);
-  dropRef.current = onDrop;
+  useEffect(() => {
+    dropRef.current = onDrop;
+  }, [onDrop]);
 
   useEffect(() => {
     if (api.dropMode !== "tauri" || !api.onFileDrop) return;

@@ -25,20 +25,18 @@ import {
 import { useApi } from "@/ipc/api";
 import type {
   AcceptPartOutput,
-  BounceResult,
   BusLogEvent,
   BusState,
+  ExportTrackOutput,
+  MasterTarget,
   PartId,
   SelfCheckReport,
-  Suggestion,
   SuggestionUpdatedEvent,
   XRayReport,
 } from "@/types/contract";
 import {
   PARTS,
   PART_ORDER,
-  chipParams,
-  defaultChips,
   paramDiff,
   resolveMusicContext,
   toolParams,
@@ -46,29 +44,17 @@ import {
   type MusicContext,
 } from "@/lib/parts";
 import { fmt } from "@/lib/format";
+import { targetLabel } from "@/lib/xray";
+import {
+  applySuggestion,
+  decideVersion,
+  emptyChannel,
+  type ChannelState,
+} from "@/store/channels";
 
 // ─── Типы состояния ─────────────────────────────────────────────────────────
 
-export interface ChannelVersion {
-  suggestion: Suggestion;
-  /** Решение по версии: ответ accept/reject или событие suggestion_updated. */
-  decision?: "accepted" | "rejected";
-  /** Дорожки хоста после accept (imported_tracks — имена дорожек движка). */
-  trackId?: string;
-}
-
-export interface ChannelState {
-  /** idle → generating → ready (+ error); accepted/rejected живут в версиях. */
-  status: "idle" | "generating" | "ready" | "error";
-  versions: ChannelVersion[];
-  /** Версия, выбранная в истории; null = последняя. */
-  selectedVersion: number | null;
-  error: string | null;
-  /** Чипы, применённые в последней версии (из suggestion.params). */
-  params: ChipValues;
-  /** Видимый diff последней регенерации: «style: basic → syncopated». */
-  chipDiff: string | null;
-}
+export type { ChannelState, ChannelError, ChannelVersion } from "@/store/channels";
 
 export interface ToastItem {
   id: number;
@@ -112,15 +98,6 @@ interface RunOptions<T> {
   retry?: () => void;
 }
 
-const emptyChannel = (part: PartId): ChannelState => ({
-  status: "idle",
-  versions: [],
-  selectedVersion: null,
-  error: null,
-  params: defaultChips(part),
-  chipDiff: null,
-});
-
 // ─── Словарь AI Dock (спека §3) ─────────────────────────────────────────────
 
 const DOCK_TOOL: Record<string, string> = {
@@ -131,7 +108,7 @@ const DOCK_TOOL: Record<string, string> = {
   accept_part: "soundcraft",
   reject_part: "soundcraft",
   adopt_loop: "soundcraft",
-  bounce: "soundcraft",
+  export_track: "soundcraft",
 };
 
 function dockVerb(command: string, arg?: string, detail?: string): string {
@@ -150,8 +127,8 @@ function dockVerb(command: string, arg?: string, detail?: string): string {
       return "применяю настройки лупа";
     case "run_self_check":
       return "проверяю микс";
-    case "bounce":
-      return "рендерю микс";
+    case "export_track":
+      return `рендерю микс${detail ? ` (${detail})` : ""}`;
     default:
       return command;
   }
@@ -195,14 +172,19 @@ export interface CockpitStore {
   rackFocusAt: number;
   requestRackFocus: () => void;
   selectChannelVersion: (part: PartId, version: number | null) => void;
+  /** Эфемерно: версию прослушали (статус «прослушано» на карточке). */
+  markAuditioned: (part: PartId, version: number) => void;
   // S6
   checking: boolean;
   selfCheck: SelfCheckReport | null;
   selfCheckPath: string | null;
   selfCheckError: string | null;
-  /** Среда умеет рендерить микс, и в сессии есть дорожки. */
-  canBounce: boolean;
-  bouncing: boolean;
+  dismissSelfCheckError: () => void;
+  /** Последний экспорт: громкость и блок цели, пока проверен его файл. */
+  lastExport: ExportTrackOutput | null;
+  exporting: boolean;
+  /** Движок поднят и в сессии есть дорожки — есть что рендерить. */
+  canExport: boolean;
   // S7
   busLog: BusLogEvent[];
   drawerOpen: boolean;
@@ -222,13 +204,21 @@ export interface CockpitStore {
   adoptLoop: (bpm: number, key: string) => Promise<void>;
   /** Первая генерация канала → generate_part. */
   generatePart: (part: PartId, chips: ChipValues) => Promise<void>;
-  /** Новая версия с изменёнными чипами → regenerate (diff только изменений). */
+  /**
+   * Новая версия с данными чипами → regenerate (diff только изменений).
+   * Без версий у канала — это первая генерация (generate_part).
+   */
   regenerate: (part: PartId, chips: ChipValues) => Promise<void>;
+  /** [Повторить] в error-состоянии канала: та же генерация, accept или reject. */
+  retryChannel: (part: PartId) => Promise<void>;
+  /** ⚙-мутатор: актуальную версию можно принять, любую показанную — нет. */
   acceptPart: (part: PartId, version: number) => Promise<void>;
   rejectPart: (part: PartId, version: number) => Promise<void>;
+  /** ⤓ Принять всё готовое: по одному accept_part на канал с нерешённой версией. */
+  acceptAllReady: () => Promise<void>;
   runSelfCheck: (bouncePath: string) => Promise<void>;
-  /** Рендер микса движком → Self-Check (вне контракта v0.2, C3). */
-  bounceAndCheck: () => Promise<void>;
+  /** Рендер микса движком → Self-Check (export_track, контракт v0.2.1). */
+  exportAndCheck: (target: MasterTarget) => Promise<void>;
   refreshBusState: () => Promise<void>;
 }
 
@@ -253,15 +243,16 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const [selectedBpm, setSelectedBpm] = useState<number | null>(null);
   const [adopting, setAdopting] = useState(false);
   const [channels, setChannels] = useState<Record<PartId, ChannelState>>({
-    bass: emptyChannel("bass"),
-    chords: emptyChannel("chords"),
-    drums: emptyChannel("drums"),
+    bass: emptyChannel(),
+    chords: emptyChannel(),
+    drums: emptyChannel(),
   });
   const [checking, setChecking] = useState(false);
   const [selfCheck, setSelfCheck] = useState<SelfCheckReport | null>(null);
   const [selfCheckPath, setSelfCheckPath] = useState<string | null>(null);
   const [selfCheckError, setSelfCheckError] = useState<string | null>(null);
-  const [bouncing, setBouncing] = useState(false);
+  const [lastExport, setLastExport] = useState<ExportTrackOutput | null>(null);
+  const [exporting, setExporting] = useState(false);
   const [busLog, setBusLog] = useState<BusLogEvent[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [dockPending, setDockPending] = useState<DockPending | null>(null);
@@ -274,7 +265,9 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const lastAttempt = useRef<{ path: string; copy: boolean } | null>(null);
   // Свежие снимки для колбэков команд — без лишних зависимостей у useCallback
   const live = useRef({ channels, loopFile });
-  live.current = { channels, loopFile };
+  useEffect(() => {
+    live.current = { channels, loopFile };
+  });
   const musicContext = useMemo(
     () => resolveMusicContext(busState, xray, selectedBpm),
     [busState, xray, selectedBpm],
@@ -326,29 +319,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       }
     });
     const un2 = api.onSuggestionUpdated((event: SuggestionUpdatedEvent) => {
-      setChannels((map) => {
-        const base = map[event.part];
-        const s = event.suggestion;
-        const decision =
-          s.status === "accepted" || s.status === "rejected" ? s.status : undefined;
-        const at = base.versions.findIndex((v) => v.suggestion.version === event.version);
-        const versions = [...base.versions];
-        if (at >= 0) {
-          versions[at] = { ...versions[at], suggestion: s, decision: decision ?? versions[at].decision };
-        } else {
-          versions.push({ suggestion: s, decision });
-        }
-        return {
-          ...map,
-          [event.part]: {
-            ...base,
-            versions,
-            params: chipParams(event.part, s.params),
-            selectedVersion: null,
-            error: null,
-          },
-        };
-      });
+      setChannels((map) => ({ ...map, [event.part]: applySuggestion(map[event.part], event) }));
     });
     const un3 = api.onHostStatus((event) => {
       setHostStatus(event.engine);
@@ -460,23 +431,21 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     [analyzeLoop],
   );
 
-  const adoptLoop = useCallback(
-    async (bpm: number, key: string) => {
-      setAdopting(true);
-      const result = await run(
-        "adopt_loop",
-        undefined,
-        () => api.adoptLoop({ bpm, key, source: live.current.loopFile?.path ?? "loop" }),
-        {
-          effect: (r) => `→ сессия: ${fmt(r.tempo)} BPM · ${r.marker}`,
-          retry: () => void adoptLoop(bpm, key),
-        },
-      );
-      setAdopting(false);
-      if (result) await refreshBusState();
-    },
-    [api, refreshBusState, run],
-  );
+  // Именованные выражения: кнопка [Повторить] в toast перезапускает ту же команду.
+  const adoptLoop = useCallback(async function adoptLoop(bpm: number, key: string) {
+    setAdopting(true);
+    const result = await run(
+      "adopt_loop",
+      undefined,
+      () => api.adoptLoop({ bpm, key, source: live.current.loopFile?.path ?? "loop" }),
+      {
+        effect: (r) => `→ сессия: ${fmt(r.tempo)} BPM · ${r.marker}`,
+        retry: () => void adoptLoop(bpm, key),
+      },
+    );
+    setAdopting(false);
+    if (result) await refreshBusState();
+  }, [api, refreshBusState, run]);
 
   const generatePart = useCallback(
     async (part: PartId, chips: ChipValues) => {
@@ -485,18 +454,19 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         return;
       }
       const name = PARTS[part].accusative;
-      const ctx = musicContext;
       patchChannel(part, (c) => ({ ...c, status: "generating", error: null }));
       await run(
         "generate_part",
         name,
-        () => api.generatePart({ tool: part, params: toolParams(part, chips, ctx) }),
+        () => api.generatePart({ tool: part, params: toolParams(part, chips, musicContext) }),
         {
           quiet: true,
           onError: (text) =>
-            patchChannel(part, (c) =>
-              c.status === "generating" ? { ...c, status: "error", error: text } : c,
-            ),
+            patchChannel(part, (c) => ({
+              ...c,
+              status: "ready",
+              error: { text, retry: { kind: "generate", chips } },
+            })),
           effect: (s) => `→ слой ${PARTS[s.part].accusative} v${s.version}`,
         },
       );
@@ -517,9 +487,10 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         return;
       }
       const name = PARTS[part].accusative;
-      const { diff, label, keys } = paramDiff(part, last.params, chips, musicContext);
+      // ядро накладывает diff на параметры последней версии — считаем против неё
+      const { diff, keys } = paramDiff(part, last.params, chips, musicContext);
       patchChannel(part, (c) => ({ ...c, status: "generating", error: null }));
-      const ok = await run(
+      await run(
         "regenerate",
         name,
         () => api.regenerate({ part, params_diff: diff }),
@@ -527,57 +498,46 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
           quiet: true,
           detail: keys.length ? keys.join(", ") : undefined,
           onError: (text) =>
-            patchChannel(part, (c) =>
-              c.status === "generating" ? { ...c, status: "error", error: text } : c,
-            ),
+            patchChannel(part, (c) => ({
+              ...c,
+              status: "ready",
+              error: { text, retry: { kind: "generate", chips } },
+            })),
           effect: (s) => `→ слой ${PARTS[s.part].accusative} обновлён (v${s.version})`,
         },
       );
-      const chipDiff = ok ? label || null : undefined;
-      patchChannel(part, (c) => ({
-        ...c,
-        status: c.status === "generating" ? "ready" : c.status,
-        chipDiff: chipDiff === undefined ? c.chipDiff : chipDiff,
-      }));
+      patchChannel(part, (c) => (c.status === "generating" ? { ...c, status: "ready" } : c));
     },
     [api, generatePart, musicContext, patchChannel, pushToast, run],
-  );
-
-  const decide = useCallback(
-    (part: PartId, version: number, decision: "accepted" | "rejected", trackId?: string) => {
-      setChannels((map) => ({
-        ...map,
-        [part]: {
-          ...map[part],
-          selectedVersion: null,
-          versions: map[part].versions.map((v) =>
-            v.suggestion.version === version ? { ...v, decision, trackId } : v,
-          ),
-        },
-      }));
-    },
-    [],
   );
 
   const acceptPart = useCallback(
     async (part: PartId, version: number) => {
       const name = PARTS[part].accusative;
+      patchChannel(part, (c) => ({ ...c, error: null }));
       const result = await run(
         "accept_part",
         `${name} v${version}`,
         () => api.acceptPart({ part, version }),
         {
+          quiet: true,
+          onError: (text) =>
+            patchChannel(part, (c) => ({
+              ...c,
+              error: { text, retry: { kind: "accept", version } },
+            })),
           effect: (r: AcceptPartOutput) => `→ дорожка ${r.imported_tracks.join(", ") || "создана"}`,
-          retry: () => void acceptPart(part, version),
         },
       );
       if (!result) return;
-      const trackId = result.imported_tracks.join(", ");
-      decide(part, version, "accepted", trackId);
-      pushToast({ tone: "ok", text: `✓ ${name} v${version} в сессии — ${trackId || "дорожка создана"}` });
+      patchChannel(part, (c) =>
+        decideVersion(c, version, "accepted", result.imported_tracks),
+      );
+      const tracks = result.imported_tracks.join(", ");
+      pushToast({ tone: "ok", text: `✓ ${name} v${version} в сессии — ${tracks || "дорожка создана"}` });
       await refreshBusState();
     },
-    [api, decide, pushToast, refreshBusState, run],
+    [api, patchChannel, pushToast, refreshBusState, run],
   );
 
   const rejectPart = useCallback(
@@ -589,19 +549,43 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         `${name} v${version}`,
         () => api.rejectPart({ part, version }).then(() => true as const),
         {
+          quiet: true,
+          onError: (text) =>
+            patchChannel(part, (c) => ({
+              ...c,
+              error: { text, retry: { kind: "reject", version } },
+            })),
           effect: () => "→ версия отклонена",
-          retry: () => void rejectPart(part, version),
         },
       );
-      if (ok) decide(part, version, "rejected");
+      if (ok) patchChannel(part, (c) => decideVersion(c, version, "rejected"));
     },
-    [api, decide, run],
+    [api, patchChannel, run],
   );
+
+  const retryChannel = useCallback(
+    async (part: PartId) => {
+      const err = live.current.channels[part].error;
+      if (!err) return;
+      if (err.retry.kind === "generate") await regenerate(part, err.retry.chips);
+      else if (err.retry.kind === "accept") await acceptPart(part, err.retry.version);
+      else await rejectPart(part, err.retry.version);
+    },
+    [acceptPart, regenerate, rejectPart],
+  );
+
+  const acceptAllReady = useCallback(async () => {
+    for (const part of PART_ORDER) {
+      const last = live.current.channels[part].versions.at(-1);
+      if (last && !last.decision) await acceptPart(part, last.suggestion.version);
+    }
+  }, [acceptPart]);
 
   const runSelfCheck = useCallback(
     async (bouncePath: string) => {
       setChecking(true);
       setSelfCheckError(null);
+      setSelfCheck(null);
       const report = await run(
         "run_self_check",
         undefined,
@@ -613,6 +597,8 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
         },
       );
       setChecking(false);
+      // блок цели показываем, только когда проверен файл последнего экспорта
+      setLastExport((prev) => (prev?.path === bouncePath ? prev : null));
       if (report) {
         setSelfCheck(report);
         setSelfCheckPath(bouncePath);
@@ -621,35 +607,24 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     [api, run],
   );
 
-  const bounceAndCheck = useCallback(async () => {
-    const bounce = api.bounce;
-    if (!bounce) return;
-    // Рендер пишется рядом со стейджингом партий — эта папка заведомо внутри
-    // песочницы движка; без партий остаётся папка лупа.
-    const staged = PART_ORDER.find(
-      (p) => typeof live.current.channels[p].versions.at(-1)?.suggestion.params.output_path === "string",
-    );
-    const anchor = staged
-      ? String(live.current.channels[staged].versions.at(-1)?.suggestion.params.output_path)
-      : live.current.loopFile?.path;
-    if (!anchor) {
-      pushToast({ text: "Некуда писать рендер: сначала разбери луп или сгенерируй партию" });
-      return;
-    }
-    const path = anchor.replace(/[^/]*$/, "l2t_mix_bounce.wav");
-    setBouncing(true);
-    const result = await run<BounceResult>(
-      "bounce",
+  const exportAndCheck = useCallback(async function exportAndCheck(target: MasterTarget) {
+    setExporting(true);
+    const result = await run<ExportTrackOutput>(
+      "export_track",
       undefined,
-      () => bounce(path),
+      () => api.exportTrack({ target }),
       {
+        detail: target === "none" ? undefined : `цель ${targetLabel(target)}`,
         effect: (r) => `→ ${fmt(r.seconds)} с · ${fmt(r.lufs)} LUFS`,
-        retry: () => void bounceAndCheck(),
+        retry: () => void exportAndCheck(target),
       },
     );
-    setBouncing(false);
-    if (result) await runSelfCheck(result.path || path);
-  }, [api, pushToast, run, runSelfCheck]);
+    setExporting(false);
+    if (result) {
+      setLastExport(result);
+      await runSelfCheck(result.path);
+    }
+  }, [api, run, runSelfCheck]);
 
   const dismissDock = useCallback(() => {
     // v0: «отменить показ» — строка уходит, операция в ядре продолжается
@@ -661,12 +636,25 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const dismissXrayError = useCallback(() => setXrayError(null), []);
+  const dismissSelfCheckError = useCallback(() => setSelfCheckError(null), []);
 
   const requestRackFocus = useCallback(() => setRackFocusAt(Date.now()), []);
 
   const selectChannelVersion = useCallback((part: PartId, version: number | null) => {
     patchChannel(part, (c) => ({ ...c, selectedVersion: version }));
   }, [patchChannel]);
+
+  const markAuditioned = useCallback((part: PartId, version: number) => {
+    setChannels((map) => ({
+      ...map,
+      [part]: {
+        ...map[part],
+        versions: map[part].versions.map((v) =>
+          v.suggestion.version === version ? { ...v, auditioned: true } : v,
+        ),
+      },
+    }));
+  }, []);
 
   const value = useMemo<CockpitStore>(
     () => ({
@@ -685,13 +673,15 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       rackFocusAt,
       requestRackFocus,
       selectChannelVersion,
+      markAuditioned,
       checking,
       selfCheck,
       selfCheckPath,
       selfCheckError,
-      canBounce:
-        typeof api.bounce === "function" && busState?.engine === "up" && (busState.tracks?.length ?? 0) > 0,
-      bouncing,
+      dismissSelfCheckError,
+      lastExport,
+      exporting,
+      canExport: busState?.engine === "up" && (busState.tracks?.length ?? 0) > 0,
       busLog,
       drawerOpen,
       setDrawerOpen,
@@ -707,19 +697,22 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       adoptLoop,
       generatePart,
       regenerate,
+      retryChannel,
       acceptPart,
       rejectPart,
+      acceptAllReady,
       runSelfCheck,
-      bounceAndCheck,
+      exportAndCheck,
       refreshBusState,
     }),
     [
-      api, hostStatus, busState, loopFile, analyzing, xray, xrayError, dismissXrayError,
+      hostStatus, busState, loopFile, analyzing, xray, xrayError, dismissXrayError,
       selectedBpm, adopting, channels, musicContext, rackFocusAt, requestRackFocus,
-      selectChannelVersion, checking, selfCheck, selfCheckPath, selfCheckError, bouncing,
-      busLog, drawerOpen, dockPending, dockLine, dockBackground, dismissDock, toasts,
-      pushToast, dismissToast, analyzeLoop, retryAnalyze, adoptLoop, generatePart,
-      regenerate, acceptPart, rejectPart, runSelfCheck, bounceAndCheck, refreshBusState,
+      selectChannelVersion, markAuditioned, checking, selfCheck, selfCheckPath,
+      selfCheckError, dismissSelfCheckError, lastExport, exporting, busLog, drawerOpen,
+      dockPending, dockLine, dockBackground, dismissDock, toasts, pushToast, dismissToast,
+      analyzeLoop, retryAnalyze, adoptLoop, generatePart, regenerate, retryChannel,
+      acceptPart, rejectPart, acceptAllReady, runSelfCheck, exportAndCheck, refreshBusState,
     ],
   );
 

@@ -1,5 +1,5 @@
 /**
- * MOCK-адаптер CockpitApi: симуляция ядра по контрактной семантике (v0.2).
+ * MOCK-адаптер CockpitApi: симуляция ядра по контрактной семантике (v0.2.1).
  * Работает в браузере — дев-харнессе; в окне его сменяет tauri-адаптер,
  * экраны не меняются. Поведение и ФОРМЫ ДАННЫХ сняты с живого ядра
  * (прогоны спайка и e2e), чтобы браузер показывал то же, что окно:
@@ -7,8 +7,12 @@
  *   значения в диапазоне ~1e-3…1e-7), LUFS, true peak;
  * - анализ ~55–91 мс (имитируем 350 мс, чтобы увидеть AI Dock),
  *   генерация 0.3–0.9 с, рендер микса ~1 с;
+ * - на партию одна актуальная версия: accept/reject только текущей,
+ *   повторный accept той же версии — ошибка (иначе плодились бы дубль-треки);
  * - Self-Check: lufs_delta = микс − луп, bands_delta = прирост по полосам
  *   от принятых партий; verdict ok ⇔ тональность и темп совпали;
+ * - export_track: рендер движком в <workspace>/export, с целью громкости —
+ *   normalize по пику (цель не гарантирована: как правило, чуть ниже);
  * - превью-WAV появляется асинхронно после generate (конвенция C2);
  * - таймаут ≠ отказ: bus_log timeout → затем inspect ok (правило 2 шины);
  * - прогрев движка ~8 с при wake (урок PoC — имитируем 3 с).
@@ -17,21 +21,24 @@
  * из консоли браузера (`mockAdapter.setFault(...)`), на живое ядро не влияет.
  */
 import type {
-  BounceResult,
   BusLogEvent,
   BusState,
+  ExportTrackInput,
+  ExportTrackOutput,
   HostStatusEvent,
   PartId,
-  SuggestionUpdatedEvent,
   SelfCheckReport,
   Suggestion,
+  SuggestionUpdatedEvent,
   XRayReport,
 } from "@/types/contract";
 import type { CockpitApi, Unsubscribe } from "@/ipc/api";
 import { GENERATIONS } from "@/mock/generations";
+import { TARGETS } from "@/lib/xray";
 
 const WORKSPACE = "/home/ilmir/music-workspace/";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const round2 = (v: number) => Math.round(v * 100) / 100;
 
 // ─── Внутреннее состояние «ядра» ───────────────────────────────────────────
 
@@ -43,6 +50,13 @@ export type FaultKind =
   | "selfcheck_key_fail"
   | "selfcheck_loud_warn";
 
+/** Актуальная версия партии — как в ядре: одна на канал, история в manifest. */
+interface CurrentPart {
+  version: number;
+  params: Record<string, unknown>;
+  status: Suggestion["status"];
+}
+
 const state = {
   engine: "up" as BusState["engine"],
   sessionName: "poc-v0.scraftz",
@@ -52,13 +66,13 @@ const state = {
   tracks: [] as { id: string; name: string; part: string }[],
   fault: "none" as FaultKind,
   nextTrackId: 7,
-  versionSeq: { bass: 0, chords: 0, drums: 0 } as Record<string, number>,
-  /** Параметры последней генерации канала (для regenerate = prev + diff). */
-  lastParams: {} as Record<string, Record<string, unknown>>,
+  current: {} as Record<string, CurrentPart>,
   /** Превью-готовность: "part:vN" → timestamp готовности WAV. */
   previews: new Map<string, number>(),
   /** Был ли анализ лупа — эталон Self-Check (как в ядре). */
   loopAnalyzed: false,
+  /** Громкость экспортов по пути: Self-Check меряет тот же файл. */
+  exportLufs: new Map<string, number>(),
 };
 
 /** Громкость и полосы «лупа» мока — то же, что отдаёт analyzeLoop. */
@@ -80,6 +94,8 @@ const LAYER_BANDS: Record<string, Record<string, number>> = {
 };
 /** Слои уводят микс вниз относительно лупа (прогон PoC: 3 слоя ≈ −4 LU). */
 const LUFS_PER_LAYER = -1.4;
+/** Демо «громкости до цели»: микс на 9.3 LU тише лупа — до Spotify −14 ровно +7.3 dB. */
+const LOUD_WARN_LUFS = -21.3;
 
 const logHandlers = new Set<(e: BusLogEvent) => void>();
 const suggestionHandlers = new Set<(e: SuggestionUpdatedEvent) => void>();
@@ -106,7 +122,7 @@ function toolOf(command: string): string {
     command.startsWith("accept") ||
     command.startsWith("reject") ||
     command === "adopt_loop" ||
-    command === "bounce"
+    command === "export_track"
   )
     return "soundcraft";
   return "midi-gen";
@@ -158,9 +174,13 @@ function generationNotes(tool: string, params: Record<string, unknown>) {
   return GENERATIONS[params.variation ? "drums_variation" : "drums_basic"];
 }
 
-function buildSuggestion(tool: string, params: Record<string, unknown>, version: number): Suggestion {
-  const key = chipKey(tool, params);
-  const meta = RATIONALE[key];
+function buildSuggestion(
+  tool: string,
+  params: Record<string, unknown>,
+  version: number,
+  status: Suggestion["status"],
+): Suggestion {
+  const meta = RATIONALE[chipKey(tool, params)];
   const sourceTool =
     tool === "bass"
       ? "midi-gen.generate_bassline v3"
@@ -181,18 +201,37 @@ function buildSuggestion(tool: string, params: Record<string, unknown>, version:
       ...params,
       output_path: `${WORKSPACE}staging/${tool}_v${version}.mid`,
     },
-    status: "generated",
+    status,
   };
 }
 
-function markGenerating(tool: string, params: Record<string, unknown>, version: number): Suggestion {
-  const suggestion = buildSuggestion(tool as PartId, params, version);
-  state.lastParams[tool] = { ...params };
+/** Новая версия партии: превью рендерится, событие уходит в окно. */
+function newVersion(tool: string, params: Record<string, unknown>): Suggestion {
+  const version = (state.current[tool]?.version ?? 0) + 1;
+  state.current[tool] = { version, params: { ...params }, status: "generated" };
   state.previews.set(`${tool}:v${version}`, Date.now() + PREVIEW_DELAY);
-  suggestionHandlers.forEach((h) =>
-    h({ part: tool as PartId, version, suggestion }),
-  );
+  return emitSuggestion(tool)!;
+}
+
+/** Событие suggestion_updated для актуальной версии (как emit_suggestion в шелле). */
+function emitSuggestion(tool: string): Suggestion | undefined {
+  const cur = state.current[tool];
+  if (!cur) return undefined;
+  const suggestion = buildSuggestion(tool, cur.params, cur.version, cur.status);
+  suggestionHandlers.forEach((h) => h({ part: tool as PartId, version: cur.version, suggestion }));
   return suggestion;
+}
+
+/** Актуальная версия партии — или ошибка ядра «не текущая». */
+function requireCurrent(tool: string, version: number): CurrentPart {
+  const cur = state.current[tool];
+  if (!cur) {
+    throw new Error(`нет предложения для партии ${tool}`);
+  }
+  if (cur.version !== version) {
+    throw new Error(`версия ${version} не текущая (текущая ${cur.version})`);
+  }
+  return cur;
 }
 
 // ─── Превью-WAV (C2: конвенция staging/<part>_v<N>.wav) ────────────────────
@@ -228,28 +267,31 @@ function previewTone(freq: number, seconds: number): string {
   return "data:audio/wav;base64," + btoa(s);
 }
 
-// ─── Self-Check / bounce (семантика ядра) ──────────────────────────────────
+// ─── Self-Check / export (семантика ядра) ──────────────────────────────────
 
-function mixLufsDelta(fault: FaultKind): number {
-  if (fault === "selfcheck_loud_warn") return 7.3;
-  return Math.round(LUFS_PER_LAYER * state.tracks.length * 100) / 100;
+function mixLufsDelta(): number {
+  return round2(LUFS_PER_LAYER * state.tracks.length);
 }
 
-function selfCheckReport(fault: FaultKind): SelfCheckReport {
+function selfCheckReport(bouncePath: string, fault: FaultKind): SelfCheckReport {
   if (!state.loopAnalyzed) {
     throw new Error("нет эталона — сначала analyze_loop(loop.wav)");
   }
   const bands_delta: Record<string, number> = {};
   for (const t of state.tracks) {
     for (const [band, v] of Object.entries(LAYER_BANDS[t.part] ?? {})) {
-      bands_delta[band] = Math.round(((bands_delta[band] ?? 0) + v) * 1e7) / 1e7;
+      bands_delta[band] = round2((bands_delta[band] ?? 0) + v);
     }
   }
+  const bounceLufs =
+    fault === "selfcheck_loud_warn"
+      ? LOUD_WARN_LUFS
+      : (state.exportLufs.get(bouncePath) ?? LOOP_LUFS + mixLufsDelta());
   const key_match = fault !== "selfcheck_key_fail";
   return {
     key_match,
     tempo_match: true,
-    lufs_delta: mixLufsDelta(fault),
+    lufs_delta: round2(bounceLufs - LOOP_LUFS),
     bands_delta,
     verdict: key_match ? "ok" : "fail",
   };
@@ -262,10 +304,6 @@ export const mockAdapter: CockpitApi & {
   setFault: (f: FaultKind) => void;
   /** MOCK-only: wake-цикл ядра (правило 5 шины; UI видит только host_status). */
   wakeEngine: () => void;
-  /** C2: готов ли превью-WAV (в окне — проверка файла на диске). */
-  previewReady: (part: string, version: number) => boolean;
-  previewUrl: (part: string, version: number) => string | null;
-  previewWavPath: (part: string, version: number) => string;
   /** MOCK-only: путь «внутри workspace» по имени файла (у File из браузера пути нет). */
   demoPath: (name: string) => string;
 } = {
@@ -300,71 +338,49 @@ export const mockAdapter: CockpitApi & {
   },
 
   async generatePart({ tool, params }) {
-    return runCommand(`generate_part (${tool})`, async () => {
+    return runCommand("generate_part", async () => {
       await delay(350 + Math.random() * 550);
-      const version = (state.versionSeq[tool] ?? 0) + 1;
-      state.versionSeq[tool] = version;
-      return markGenerating(tool, params, version);
+      return newVersion(tool, params);
     });
   },
 
   async regenerate({ part, params_diff }) {
-    return runCommand(`regenerate (${part})`, async () => {
+    return runCommand("regenerate", async () => {
       await delay(300 + Math.random() * 500);
-      if (!state.lastParams[part]) {
+      if (!state.current[part]) {
         throw new Error("нет предыдущей версии — сначала generate_part");
       }
-      const version = (state.versionSeq[part] ?? 0) + 1;
-      state.versionSeq[part] = version;
-      return markGenerating(part, { ...state.lastParams[part], ...params_diff }, version);
+      // diff накладывается на параметры предыдущей версии (как в ядре)
+      return newVersion(part, { ...state.current[part].params, ...params_diff });
     });
   },
 
   async acceptPart({ part, version }) {
-    return runCommand(`accept_part (${part} v${version})`, async () => {
+    return runCommand("accept_part", async () => {
       await delay(600);
       if (state.engine !== "up") {
         throw new Error("движок SoundCraft не подключён (см. get_mcp_slots / Screen 0)");
       }
-      if (state.versionSeq[part] !== version) {
-        throw new Error(`версия ${version} не текущая (текущая ${state.versionSeq[part]})`);
+      const cur = requireCurrent(part, version);
+      // идемпотентность: повторный accept не плодит дубль-трек
+      if (cur.status === "accepted") {
+        throw new Error(`партия ${part} v${version} уже принята в сессию; для новой версии жми Regenerate`);
       }
       const trackId = state.nextTrackId++;
       const name = `MIDI ${trackId - 6}`;
       state.tracks.push({ id: `track-${trackId}`, name, part });
-      const current = state.lastParams[part];
-      suggestionHandlers.forEach((h) =>
-        h({
-          part: part as PartId,
-          version,
-          suggestion: {
-            ...buildSuggestion(part, current, version),
-            status: "accepted",
-          },
-        }),
-      );
+      cur.status = "accepted";
+      emitSuggestion(part);
       // imported_tracks — имена дорожек движка (как в ядре)
       return { imported_tracks: [name] };
     });
   },
 
   async rejectPart({ part, version }) {
-    return runCommand(`reject_part (${part} v${version})`, async () => {
+    return runCommand("reject_part", async () => {
       await delay(150);
-      if (state.versionSeq[part] !== version) {
-        throw new Error(`версия ${version} не текущая (текущая ${state.versionSeq[part]})`);
-      }
-      const current = state.lastParams[part];
-      suggestionHandlers.forEach((h) =>
-        h({
-          part: part as PartId,
-          version,
-          suggestion: {
-            ...buildSuggestion(part, current, version),
-            status: "rejected",
-          },
-        }),
-      );
+      requireCurrent(part, version).status = "rejected";
+      emitSuggestion(part);
     });
   },
 
@@ -395,23 +411,39 @@ export const mockAdapter: CockpitApi & {
       if (!bounce_path.startsWith(WORKSPACE)) {
         throw new Error(`Bounce вне workspace (${bounce_path}) — правило 1 шины`);
       }
-      return selfCheckReport(fault);
+      return selfCheckReport(bounce_path, fault);
     });
   },
 
-  async bounce(path) {
-    return runCommand<BounceResult>("bounce", async () => {
+  async exportTrack({ output_path, target }: ExportTrackInput): Promise<ExportTrackOutput> {
+    return runCommand("export_track", async () => {
       await delay(1100);
       if (state.engine !== "up") {
         throw new Error("движок SoundCraft не подключён");
       }
+      const name = target && target !== "none" ? target : null;
+      const goal = name ? TARGETS[name] : null;
+      const path = output_path ?? `${WORKSPACE}export/l2t-export-${name ? `${name}-` : ""}${Date.now()}.wav`;
+      // движок нормализует только по пику: до LUFS-цели, как правило, чуть не дотягивает
+      const lufs = goal ? round2(goal.lufs - 1.1) : round2(LOOP_LUFS + mixLufsDelta());
+      state.exportLufs.set(path, lufs);
       return {
         path,
-        bytes: 44_100 * 4 * 8 * 1.3,
         seconds: 8,
-        lufs: Math.round((LOOP_LUFS + mixLufsDelta("none")) * 10) / 10,
-        peak_db: -3.1,
-        true_peak_db: -2.9,
+        lufs,
+        peak_db: goal ? -0.1 : -3.1,
+        true_peak_db: goal ? -0.07 : -2.9,
+        target: name ?? "none",
+        mastering: goal
+          ? {
+              target_lufs: goal.lufs,
+              applied: "normalize",
+              achieved_lufs: lufs,
+              delta: round2(goal.lufs - lufs),
+              verdict: "below_target",
+              measured_by: "analyzer",
+            }
+          : null,
       };
     });
   },
@@ -431,6 +463,12 @@ export const mockAdapter: CockpitApi & {
 
   dropMode: "html5",
 
+  previewUrl(part, version) {
+    const at = state.previews.get(`${part}:v${version}`);
+    if (at === undefined || Date.now() < at) return null;
+    return previewTone(PREVIEW_FREQ[part] ?? 110, 5.3);
+  },
+
   // ── MOCK-only расширения (тестовое управление) ──
 
   setFault(f) {
@@ -445,17 +483,6 @@ export const mockAdapter: CockpitApi & {
     setTimeout(() => emitHost("up"), 3000);
   },
 
-  previewReady(part, version) {
-    const at = state.previews.get(`${part}:v${version}`);
-    return at !== undefined && Date.now() >= at;
-  },
-  previewUrl(part, version) {
-    if (!mockAdapter.previewReady(part, version)) return null;
-    return previewTone(PREVIEW_FREQ[part] ?? 110, 5.3);
-  },
-  previewWavPath(part, version) {
-    return `${WORKSPACE}staging/${part}_v${version}.wav`;
-  },
   demoPath(name) {
     return `${WORKSPACE}${name}`;
   },

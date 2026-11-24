@@ -8,15 +8,11 @@ import { useState } from "react";
 import { Pause, Play, Square } from "lucide-react";
 
 import { adapterMode } from "@/ipc/api";
+import { stripKeyMarker } from "@/lib/parts";
 import { useCockpit } from "@/store/cockpit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-
-/** «Key: E minor» → «E minor»; всё, что не по конвенции, показываем как есть. */
-function markerLabel(marker: string): string {
-  return marker.replace(/^Key:\s*/, "");
-}
 
 export function TopBar() {
   const { hostStatus, busState, setDrawerOpen, drawerOpen } = useCockpit();
@@ -32,7 +28,7 @@ export function TopBar() {
     hostStatus === "up" ? "движок" : hostStatus === "waking" ? "движок: прогрев" : "движок: спит";
   const session = busState?.session_name;
   const tempo = busState?.tempo != null ? `${Math.round(busState.tempo)} BPM` : "— BPM";
-  const key = busState?.key_marker ? markerLabel(busState.key_marker) : "—";
+  const key = busState?.key_marker ? stripKeyMarker(busState.key_marker) : "—";
 
   return (
     <header className="bg-card flex items-center gap-3 rounded-2xl border px-3 py-2">
