@@ -14,6 +14,7 @@ import type {
   AdoptLoopInput,
   AdoptLoopOutput,
   AnalyzeLoopInput,
+  BounceResult,
   BusLogEvent,
   BusState,
   GeneratePartInput,
@@ -29,6 +30,17 @@ import type {
 
 export type Unsubscribe = () => void;
 
+/** Как окно получает перетаскиваемые файлы (мост двух сред — lib/use-file-drop.ts). */
+export type DropMode = "html5" | "tauri";
+
+/** Событие нативного drag-and-drop окна: курсор + путь первого файла (для drop). */
+export interface FileDropEvent {
+  kind: "over" | "leave" | "drop";
+  /** Физические пиксели относительно окна; null, если среда позицию не дала. */
+  position: { x: number; y: number } | null;
+  path: string | null;
+}
+
 export interface CockpitApi {
   // ── Commands (UI → ядро) ──
   analyzeLoop(input: AnalyzeLoopInput): Promise<XRayReport>;
@@ -39,11 +51,21 @@ export interface CockpitApi {
   adoptLoop(input: AdoptLoopInput): Promise<AdoptLoopOutput>;
   getBusState(): Promise<BusState>;
   runSelfCheck(input: RunSelfCheckInput): Promise<SelfCheckReport>;
+  /**
+   * Вне таблицы v0.2 (C3 ⏸): рендер микса движком в WAV по пути внутри
+   * песочницы. undefined — среда рендерить не умеет (UI кнопку не показывает).
+   */
+  bounce?(path: string): Promise<BounceResult>;
 
   // ── Events (ядро → UI) ──
   onBusLog(handler: (event: BusLogEvent) => void): Unsubscribe;
   onSuggestionUpdated(handler: (event: SuggestionUpdatedEvent) => void): Unsubscribe;
   onHostStatus(handler: (event: HostStatusEvent) => void): Unsubscribe;
+
+  // ── Среда ──
+  readonly dropMode: DropMode;
+  /** Только при dropMode «tauri»: нативное событие tauri://drag-drop всего окна. */
+  onFileDrop?(handler: (event: FileDropEvent) => void): Unsubscribe;
 }
 
 // ─── Переключение адаптеров: авто-детект среды ────────────────────────────

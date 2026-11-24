@@ -1,17 +1,23 @@
 /**
- * MOCK-адаптер CockpitApi: полная симуляция ядра l2t-core по контрактной
- * семантике (v0.2). Умирает при переключении на tauriAdapter — экраны не
- * меняются. Поведение снято с реальных прогонов PoC/спайка:
+ * MOCK-адаптер CockpitApi: симуляция ядра по контрактной семантике (v0.2).
+ * Работает в браузере — дев-харнессе; в окне его сменяет tauri-адаптер,
+ * экраны не меняются. Поведение и ФОРМЫ ДАННЫХ сняты с живого ядра
+ * (прогоны спайка и e2e), чтобы браузер показывал то же, что окно:
+ * - X-Ray: 7 полос анализатора с линейной энергией (sub_bass…brilliance,
+ *   значения в диапазоне ~1e-3…1e-7), LUFS, true peak;
  * - анализ ~55–91 мс (имитируем 350 мс, чтобы увидеть AI Dock),
- * - генерация 0.3–0.9 с,
- * - превью-WAV появляется асинхронно после generate (конвенция C2),
- * - таймаут ≠ отказ: bus_log timeout → затем inspect ok (правило 2 шины),
+ *   генерация 0.3–0.9 с, рендер микса ~1 с;
+ * - Self-Check: lufs_delta = микс − луп, bands_delta = прирост по полосам
+ *   от принятых партий; verdict ok ⇔ тональность и темп совпали;
+ * - превью-WAV появляется асинхронно после generate (конвенция C2);
+ * - таймаут ≠ отказ: bus_log timeout → затем inspect ok (правило 2 шины);
  * - прогрев движка ~8 с при wake (урок PoC — имитируем 3 с).
  *
- * Симулятор сбоев (faults) — временный тестовый инструмент v0 (управляется
- * из S7 drawer, панель «MOCK»): снимается вместе с адаптером.
+ * Симулятор сбоев (faults) — тестовый инструмент дев-харнесса: включается
+ * из консоли браузера (`mockAdapter.setFault(...)`), на живое ядро не влияет.
  */
 import type {
+  BounceResult,
   BusLogEvent,
   BusState,
   HostStatusEvent,
@@ -40,8 +46,9 @@ export type FaultKind =
 const state = {
   engine: "up" as BusState["engine"],
   sessionName: "poc-v0.scraftz",
-  tempo: 90,
-  keyMarker: "Am",
+  /** Новая сессия движка стартует с 120 BPM и без key-маркера (паритет с ядром). */
+  tempo: 120,
+  keyMarker: null as string | null,
   tracks: [] as { id: string; name: string; part: string }[],
   fault: "none" as FaultKind,
   nextTrackId: 7,
@@ -50,7 +57,29 @@ const state = {
   lastParams: {} as Record<string, Record<string, unknown>>,
   /** Превью-готовность: "part:vN" → timestamp готовности WAV. */
   previews: new Map<string, number>(),
+  /** Был ли анализ лупа — эталон Self-Check (как в ядре). */
+  loopAnalyzed: false,
 };
+
+/** Громкость и полосы «лупа» мока — то же, что отдаёт analyzeLoop. */
+const LOOP_LUFS = -12.0;
+const LOOP_BANDS: Record<string, number> = {
+  sub_bass: 0.00021,
+  bass: 0.00412,
+  low_mid: 0.00261,
+  mid: 0.00038,
+  upper_mid: 0.000026,
+  presence: 0.000006,
+  brilliance: 0.0000004,
+};
+/** Что добавляет каждая принятая партия (линейная энергия полос). */
+const LAYER_BANDS: Record<string, Record<string, number>> = {
+  bass: { sub_bass: 0.00031, bass: 0.00052 },
+  chords: { low_mid: 0.00019, mid: 0.00007 },
+  drums: { bass: 0.00011, upper_mid: 0.0000041, presence: 0.0000022 },
+};
+/** Слои уводят микс вниз относительно лупа (прогон PoC: 3 слоя ≈ −4 LU). */
+const LUFS_PER_LAYER = -1.4;
 
 const logHandlers = new Set<(e: BusLogEvent) => void>();
 const suggestionHandlers = new Set<(e: SuggestionUpdatedEvent) => void>();
@@ -73,33 +102,35 @@ function emitTimeoutThenInspect(command: string) {
 
 function toolOf(command: string): string {
   if (command.startsWith("analyze") || command.startsWith("run_self")) return "audio-analyzer";
-  if (command.startsWith("accept") || command.startsWith("reject") || command === "adopt_loop")
+  if (
+    command.startsWith("accept") ||
+    command.startsWith("reject") ||
+    command === "adopt_loop" ||
+    command === "bounce"
+  )
     return "soundcraft";
   return "midi-gen";
 }
 
-async function runCommand<T>(command: string, work: () => Promise<T>): Promise<T> {
+/** Прогон «вызова шины»: fault снимается с очереди и уходит в work одним кадром с ним. */
+async function runCommand<T>(command: string, work: (fault: FaultKind) => Promise<T>): Promise<T> {
   const fault = state.fault;
   state.fault = "none";
   const t0 = Date.now();
   if (fault === "timeout_on_next") {
     emitTimeoutThenInspect(command);
     await delay(1000); // ядро «потеряло ответ», но операция прошла
-    return work();
+    return work("none");
   }
-  const result = await work();
+  const result = await work(fault);
   const ms = Date.now() - t0;
   if (fault === "error_on_next") {
     emitBusLog(toolOf(command), command, "error", ms);
-    throw new Error(
-      `JSON-RPC error: симуляция сбоя сервера (${MOCK_HINT})`,
-    );
+    throw new Error(`JSON-RPC error: симуляция сбоя сервера (mockAdapter.setFault)`);
   }
   emitBusLog(toolOf(command), command, "ok", ms);
   return result;
 }
-
-const MOCK_HINT = "симулятор сбоев в S7 drawer";
 
 // ─── Генерации (словарь чипов midi-gen v3, спека S3) ───────────────────────
 
@@ -108,7 +139,7 @@ const RATIONALE: Record<string, { text: string; conf: number }> = {
   "bass:octaves": { text: "октавный ход: драйв для роста плотности (onset 2.1/долю)", conf: 0.62 },
   "bass:syncopated": { text: "синкопа в духе ритма лупа — off-beats 1.5/3.5", conf: 0.84 },
   "bass:walking": { text: "ходовая линия по квинто-кварцевому кругу", conf: 0.66 },
-  "bass:sub": { text: "суб-дистанция: минимум нот, максимум низа", conf: 0.71 },
+  "bass:sub": { text: "суб-бас: минимум нот, максимум низа", conf: 0.71 },
   "chords:voiceled": { text: "инверсии: соседние аккорды ≤4 п/т (block=7)", conf: 0.9 },
   "chords:block": { text: "блок-трезвучия корневой позиции — плотнее фундамент", conf: 0.55 },
   "drums:basic": { text: "прямая бочка 1&3, хэты 8-е — сетка под луп", conf: 0.82 },
@@ -143,7 +174,13 @@ function buildSuggestion(tool: string, params: Record<string, unknown>, version:
     rationale: meta.text,
     confidence: meta.conf,
     source_tool: sourceTool,
-    params: { bpm: state.tempo, key: "A minor", ...params },
+    // как ядро: эффективные параметры инструмента (+ путь стейджинга)
+    params: {
+      bpm: Math.round(Number(params.bpm ?? state.tempo)),
+      ...(tool === "drums" ? {} : { key: String(params.key ?? "A minor") }),
+      ...params,
+      output_path: `${WORKSPACE}staging/${tool}_v${version}.mid`,
+    },
     status: "generated",
   };
 }
@@ -191,17 +228,46 @@ function previewTone(freq: number, seconds: number): string {
   return "data:audio/wav;base64," + btoa(s);
 }
 
+// ─── Self-Check / bounce (семантика ядра) ──────────────────────────────────
+
+function mixLufsDelta(fault: FaultKind): number {
+  if (fault === "selfcheck_loud_warn") return 7.3;
+  return Math.round(LUFS_PER_LAYER * state.tracks.length * 100) / 100;
+}
+
+function selfCheckReport(fault: FaultKind): SelfCheckReport {
+  if (!state.loopAnalyzed) {
+    throw new Error("нет эталона — сначала analyze_loop(loop.wav)");
+  }
+  const bands_delta: Record<string, number> = {};
+  for (const t of state.tracks) {
+    for (const [band, v] of Object.entries(LAYER_BANDS[t.part] ?? {})) {
+      bands_delta[band] = Math.round(((bands_delta[band] ?? 0) + v) * 1e7) / 1e7;
+    }
+  }
+  const key_match = fault !== "selfcheck_key_fail";
+  return {
+    key_match,
+    tempo_match: true,
+    lufs_delta: mixLufsDelta(fault),
+    bands_delta,
+    verdict: key_match ? "ok" : "fail",
+  };
+}
+
 // ─── Адаптер ───────────────────────────────────────────────────────────────
 
 export const mockAdapter: CockpitApi & {
-  /** MOCK-only: включить следующий сбой (снимается вместе с адаптером). */
+  /** MOCK-only: включить следующий сбой. */
   setFault: (f: FaultKind) => void;
   /** MOCK-only: wake-цикл ядра (правило 5 шины; UI видит только host_status). */
   wakeEngine: () => void;
-  /** C2: готов ли превью-WAV (в tauri-адаптере — проверка файла на диске). */
+  /** C2: готов ли превью-WAV (в окне — проверка файла на диске). */
   previewReady: (part: string, version: number) => boolean;
   previewUrl: (part: string, version: number) => string | null;
   previewWavPath: (part: string, version: number) => string;
+  /** MOCK-only: путь «внутри workspace» по имени файла (у File из браузера пути нет). */
+  demoPath: (name: string) => string;
 } = {
   async analyzeLoop({ path, copy_into_workspace }) {
     return runCommand("analyze_loop", async () => {
@@ -216,17 +282,19 @@ export const mockAdapter: CockpitApi & {
       }
       const name = path.split("/").pop() ?? "loop.wav";
       state.sessionName = name.replace(/\.[^.]+$/, "");
+      state.loopAnalyzed = true;
       return {
         bpm: 90.1,
-        bpm_confidence: 0.64,
+        // рубато-темп — честная низкая уверенность, как у живого анализатора
+        bpm_confidence: 0.42,
         bpm_alt: 180.2,
         key: "A minor",
         key_confidence: 0.91,
         key_relative: "C major",
-        lufs: -12.0,
+        lufs: LOOP_LUFS,
         true_peak: -2.4,
-        bands: { "суб-бас": -28.5, "низкие": -14.2, "средние": -16.8, "верх": -30.1 },
-        onset_density: 2.1,
+        bands: { ...LOOP_BANDS },
+        onset_density: 2.1908,
       } satisfies XRayReport;
     });
   },
@@ -243,6 +311,9 @@ export const mockAdapter: CockpitApi & {
   async regenerate({ part, params_diff }) {
     return runCommand(`regenerate (${part})`, async () => {
       await delay(300 + Math.random() * 500);
+      if (!state.lastParams[part]) {
+        throw new Error("нет предыдущей версии — сначала generate_part");
+      }
       const version = (state.versionSeq[part] ?? 0) + 1;
       state.versionSeq[part] = version;
       return markGenerating(part, { ...state.lastParams[part], ...params_diff }, version);
@@ -253,62 +324,95 @@ export const mockAdapter: CockpitApi & {
     return runCommand(`accept_part (${part} v${version})`, async () => {
       await delay(600);
       if (state.engine !== "up") {
-        throw new Error("Хост не отвечает (engine ≠ up) — accept невозможен, разбуди движок");
+        throw new Error("движок SoundCraft не подключён (см. get_mcp_slots / Screen 0)");
+      }
+      if (state.versionSeq[part] !== version) {
+        throw new Error(`версия ${version} не текущая (текущая ${state.versionSeq[part]})`);
       }
       const trackId = state.nextTrackId++;
-      state.tracks.push({ id: `track-${trackId}`, name: `${part} v${version}`, part });
-      return { imported_tracks: [String(trackId)] };
+      const name = `MIDI ${trackId - 6}`;
+      state.tracks.push({ id: `track-${trackId}`, name, part });
+      const current = state.lastParams[part];
+      suggestionHandlers.forEach((h) =>
+        h({
+          part: part as PartId,
+          version,
+          suggestion: {
+            ...buildSuggestion(part, current, version),
+            status: "accepted",
+          },
+        }),
+      );
+      // imported_tracks — имена дорожек движка (как в ядре)
+      return { imported_tracks: [name] };
     });
   },
 
   async rejectPart({ part, version }) {
     return runCommand(`reject_part (${part} v${version})`, async () => {
       await delay(150);
+      if (state.versionSeq[part] !== version) {
+        throw new Error(`версия ${version} не текущая (текущая ${state.versionSeq[part]})`);
+      }
+      const current = state.lastParams[part];
+      suggestionHandlers.forEach((h) =>
+        h({
+          part: part as PartId,
+          version,
+          suggestion: {
+            ...buildSuggestion(part, current, version),
+            status: "rejected",
+          },
+        }),
+      );
     });
   },
 
   async adoptLoop({ bpm, key }) {
     return runCommand("adopt_loop", async () => {
       await delay(400);
-      state.tempo = bpm;
-      state.keyMarker = key.replace(" minor", "m").replace(" major", "");
+      state.tempo = Math.round(bpm * 10) / 10;
+      state.keyMarker = `Key: ${key}`;
       return { tempo: state.tempo, marker: state.keyMarker };
     });
   },
 
   async getBusState() {
     await delay(60);
+    const up = state.engine === "up";
     return {
-      tempo: state.tempo,
-      key_marker: state.keyMarker,
+      tempo: up ? state.tempo : null,
+      key_marker: up ? state.keyMarker : null,
       tracks: state.tracks.map((t) => ({ ...t })),
       engine: state.engine,
-      session_name: state.sessionName,
+      session_name: up ? state.sessionName : null,
     } satisfies BusState;
   },
 
   async runSelfCheck({ bounce_path }) {
-    return runCommand("run_self_check", async () => {
+    return runCommand("run_self_check", async (fault) => {
       await delay(650);
       if (!bounce_path.startsWith(WORKSPACE)) {
         throw new Error(`Bounce вне workspace (${bounce_path}) — правило 1 шины`);
       }
-      if (state.fault === "selfcheck_key_fail") {
-        return {
-          key_match: false,
-          tempo_match: true,
-          lufs_delta: -0.6,
-          bands_delta: { "суб-бас": 5.7, "низкие": 6.7, "средние": 6.5, "верх": 2.1 },
-          verdict: "fail",
-        } satisfies SelfCheckReport;
+      return selfCheckReport(fault);
+    });
+  },
+
+  async bounce(path) {
+    return runCommand<BounceResult>("bounce", async () => {
+      await delay(1100);
+      if (state.engine !== "up") {
+        throw new Error("движок SoundCraft не подключён");
       }
       return {
-        key_match: true,
-        tempo_match: true,
-        lufs_delta: state.fault === "selfcheck_loud_warn" ? 7.3 : -0.4,
-        bands_delta: { "суб-бас": 5.7, "низкие": 6.7, "средние": 6.5, "верх": 2.1 },
-        verdict: "ok",
-      } satisfies SelfCheckReport;
+        path,
+        bytes: 44_100 * 4 * 8 * 1.3,
+        seconds: 8,
+        lufs: Math.round((LOOP_LUFS + mixLufsDelta("none")) * 10) / 10,
+        peak_db: -3.1,
+        true_peak_db: -2.9,
+      };
     });
   },
 
@@ -325,7 +429,9 @@ export const mockAdapter: CockpitApi & {
     return () => hostHandlers.delete(handler);
   },
 
-  // ── MOCK-only расширения (тестовое управление; снимаются с адаптером) ──
+  dropMode: "html5",
+
+  // ── MOCK-only расширения (тестовое управление) ──
 
   setFault(f) {
     state.fault = f;
@@ -349,6 +455,9 @@ export const mockAdapter: CockpitApi & {
   },
   previewWavPath(part, version) {
     return `${WORKSPACE}staging/${part}_v${version}.wav`;
+  },
+  demoPath(name) {
+    return `${WORKSPACE}${name}`;
   },
 };
 

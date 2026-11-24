@@ -1,17 +1,21 @@
 /**
  * TAURI-адаптер CockpitApi: тот же интерфейс, транспорт = Tauri IPC
- * (invoke команд ядра + listen событий). Заготовка: экраны не меняются,
- * вживление ядра ядром = раскомментировать invoke-строки и переключить
- * `currentAdapter` в api.ts (ОДНА строка).
+ * (invoke команд ядра + listen событий). Экраны не меняются при переходе
+ * на мок и обратно.
  *
  * Имена команд ядра — в точности ipc-contract v0.2:
  * analyze_loop / generate_part / regenerate / accept_part / reject_part /
  * adopt_loop / get_bus_state / run_self_check; события — bus_log /
- * suggestion_updated / host_status.
+ * suggestion_updated / host_status (сверено с шеллом).
+ *
+ * Провод: вход команды уходит одним объектом `input`, поля внутри —
+ * snake_case, 1:1 с `*Input` зеркала контракта. Стороны сходятся на этой
+ * форме: ядро читает вход из `input`, а не из отдельных аргументов.
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  BounceResult,
   BusLogEvent,
   BusState,
   HostStatusEvent,
@@ -23,62 +27,105 @@ import type {
 import type { CockpitApi, Unsubscribe } from "@/ipc/api";
 
 // Транспортные события ядра приходят в окно с префиксом контракта.
-// TODO(ядро): сверить имена emit-ов ядра с этим списком (один источник —
-// docs/ipc-contract.md v0.2).
 const EV = {
   busLog: "bus_log",
   suggestionUpdated: "suggestion_updated",
   hostStatus: "host_status",
 } as const;
 
-function wrap<T>(p: Promise<T>): Promise<T> {
-  // Ядро отдаёт ошибки как текст JSON-RPC (правило 3) — наверх идёт как есть.
-  return p;
+// Нативный drag-and-drop окна (WebKitGTK при dragDropEnabled перехватывает
+// HTML5-drop — путь файла приходит только сюда). Позиция — физические
+// пиксели от левого верхнего угла webview.
+const DND = {
+  enter: "tauri://drag-enter",
+  over: "tauri://drag-over",
+  drop: "tauri://drag-drop",
+  leave: "tauri://drag-leave",
+} as const;
+
+interface DragDropPayload {
+  paths?: unknown;
+  position?: { x?: number; y?: number } | null;
+}
+
+/**
+ * Подписка с отложенной регистрацией: listen асинхронен, а cleanup эффекта
+ * может прийти раньше (StrictMode) — закрытый флаг не даёт слушателю
+ * пережить свою подписку.
+ */
+function subscribe<T>(name: string, handler: (payload: T) => void): Unsubscribe {
+  let un: UnlistenFn | null = null;
+  let closed = false;
+  listen<T>(name, (e) => handler(e.payload)).then(
+    (u) => {
+      if (closed) u();
+      else un = u;
+    },
+    () => {
+      /* ядро ещё не поднялось — событие всё равно не пришло бы */
+    },
+  );
+  return () => {
+    closed = true;
+    un?.();
+  };
 }
 
 export const tauriAdapter: CockpitApi = {
   async analyzeLoop(input) {
-    return wrap(invoke<XRayReport>("analyze_loop", { input }));
+    // Ядро отдаёт ошибки текстом JSON-RPC (правило 3) — наверх идёт как есть.
+    return invoke<XRayReport>("analyze_loop", { input });
   },
   async generatePart(input) {
-    return wrap(invoke<Suggestion>("generate_part", { input }));
+    return invoke<Suggestion>("generate_part", { input });
   },
   async regenerate(input) {
-    return wrap(invoke<Suggestion>("regenerate", { input }));
+    return invoke<Suggestion>("regenerate", { input });
   },
   async acceptPart(input) {
-    return wrap(invoke<{ imported_tracks: string[] }>("accept_part", { input }));
+    return invoke<{ imported_tracks: string[] }>("accept_part", { input });
   },
   async rejectPart(input) {
-    await wrap(invoke("reject_part", { input }));
+    await invoke("reject_part", { input });
   },
   async adoptLoop(input) {
-    return wrap(invoke<{ tempo: number; marker: string }>("adopt_loop", { input }));
+    return invoke<{ tempo: number; marker: string }>("adopt_loop", { input });
   },
   async getBusState() {
-    return wrap(invoke<BusState>("get_bus_state"));
+    return invoke<BusState>("get_bus_state");
   },
   async runSelfCheck(input) {
-    return wrap(invoke<SelfCheckReport>("run_self_check", { input }));
+    return invoke<SelfCheckReport>("run_self_check", { input });
+  },
+  // Вне контракта v0.2: команда шелла `bounce` принимает путь отдельным
+  // аргументом (camelCase от path = path), нормализации у движка нет.
+  bounce(path) {
+    return invoke<BounceResult>("bounce", { path });
   },
 
   onBusLog(handler): Unsubscribe {
-    let un: UnlistenFn | null = null;
-    listen<BusLogEvent>(EV.busLog, (e) => handler(e.payload)).then((u) => (un = u));
-    return () => un?.();
+    return subscribe<BusLogEvent>(EV.busLog, handler);
   },
   onSuggestionUpdated(handler): Unsubscribe {
-    let un: UnlistenFn | null = null;
-    listen<SuggestionUpdatedEvent>(EV.suggestionUpdated, (e) => handler(e.payload)).then(
-      (u) => (un = u),
-    );
-    return () => un?.();
+    return subscribe<SuggestionUpdatedEvent>(EV.suggestionUpdated, handler);
   },
   onHostStatus(handler): Unsubscribe {
-    let un: UnlistenFn | null = null;
-    listen<HostStatusEvent>(EV.hostStatus, (e) => handler(e.payload)).then((u) => (un = u));
-    return () => un?.();
+    return subscribe<HostStatusEvent>(EV.hostStatus, handler);
+  },
+
+  dropMode: "tauri",
+  onFileDrop(handler): Unsubscribe {
+    const position = (p: DragDropPayload["position"]) =>
+      p && typeof p.x === "number" && typeof p.y === "number" ? { x: p.x, y: p.y } : null;
+    const firstPath = (p: DragDropPayload) =>
+      Array.isArray(p.paths) && typeof p.paths[0] === "string" ? p.paths[0] : null;
+    const offs = [
+      subscribe<DragDropPayload>(DND.over, (p) => handler({ kind: "over", position: position(p.position), path: null })),
+      subscribe<DragDropPayload>(DND.leave, () => handler({ kind: "leave", position: null, path: null })),
+      subscribe<DragDropPayload>(DND.drop, (p) =>
+        handler({ kind: "drop", position: position(p.position), path: firstPath(p) }),
+      ),
+    ];
+    return () => offs.forEach((off) => off());
   },
 };
-
-// ЗАМЕЧАНИЕ: mock-адаптер — источник поведения до вживления ядра.

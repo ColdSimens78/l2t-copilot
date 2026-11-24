@@ -1,14 +1,22 @@
 /**
  * TopBar (спека §4): точка engine (up зелёная / waking пульс / down красная,
- * клик → S0), сессия (C6 session_name), BPM + key из get_bus_state,
- * транспорт — read-only с подсказкой (T1: хост — движок).
+ * клик → S0), сессия (C6 session_name), BPM + key из get_bus_state
+ * (null при спящем движке — примечание 6 контракта), транспорт — read-only
+ * с подсказкой (T1: хост — движок).
  */
 import { useState } from "react";
 import { Pause, Play, Square } from "lucide-react";
 
+import { adapterMode } from "@/ipc/api";
 import { useCockpit } from "@/store/cockpit";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+
+/** «Key: E minor» → «E minor»; всё, что не по конвенции, показываем как есть. */
+function markerLabel(marker: string): string {
+  return marker.replace(/^Key:\s*/, "");
+}
 
 export function TopBar() {
   const { hostStatus, busState, setDrawerOpen, drawerOpen } = useCockpit();
@@ -22,6 +30,9 @@ export function TopBar() {
         : "bg-destructive";
   const engineLabel =
     hostStatus === "up" ? "движок" : hostStatus === "waking" ? "движок: прогрев" : "движок: спит";
+  const session = busState?.session_name;
+  const tempo = busState?.tempo != null ? `${Math.round(busState.tempo)} BPM` : "— BPM";
+  const key = busState?.key_marker ? markerLabel(busState.key_marker) : "—";
 
   return (
     <header className="bg-card flex items-center gap-3 rounded-2xl border px-3 py-2">
@@ -33,12 +44,17 @@ export function TopBar() {
         <span aria-hidden className={cn("size-2.5 rounded-full", dot)} />
         <span className="text-card-foreground">{engineLabel}</span>
       </button>
-      <span className="text-muted-foreground font-mono text-xs">
-        {busState?.session_name ? `сессия: ${busState.session_name}` : "сессия: —"}
+      <span className="text-muted-foreground max-w-40 truncate font-mono text-xs" title={session ?? undefined}>
+        {session ? `сессия: ${session}` : "сессия: —"}
       </span>
       <span className="text-card-foreground font-mono text-xs">
-        {busState ? `${Math.round(busState.tempo)} BPM · ${busState.key_marker}` : "— BPM · —"}
+        {tempo} · {key}
       </span>
+      {adapterMode === "mock" ? (
+        <Badge className="text-muted-foreground" title="Браузер работает на симуляции ядра; живое ядро — в окне приложения" variant="outline">
+          демо
+        </Badge>
+      ) : null}
 
       <div className="relative ml-auto flex items-center gap-1">
         <Button

@@ -1,8 +1,9 @@
 /**
  * AI Dock (спека §3): постоянная нижняя строка, единственное место «подожди».
  * pending виден только после 300 мс (трёхуровневая индикация USER FLOW);
- * [отменить] v0 = «отменить показ». Претендует на фокус окна НЕ должен
- * (Tauri #11814 — проектируем без no-focus требований).
+ * дольше 10 с — честная подпись, история — в drawer. [отменить] v0 =
+ * «отменить показ». Претендовать на фокус окна НЕ должен (Tauri #11814 —
+ * проектируем без no-focus требований).
  */
 import { useEffect, useState } from "react";
 
@@ -10,6 +11,7 @@ import { useCockpit } from "@/store/cockpit";
 import { cn } from "@/lib/utils";
 
 const PENDING_DELAY = 300;
+const LONG_PENDING = 10_000;
 
 export function AiDock() {
   const { dockPending, dockLine, dockBackground, dismissDock } = useCockpit();
@@ -23,16 +25,20 @@ export function AiDock() {
   }, [dockPending, dockLine]);
 
   const pendingVisible = dockPending !== null && now - dockPending.sinceTs >= PENDING_DELAY;
-  const longPending = pendingVisible && dockPending && now - dockPending.sinceTs > 10_000;
+  const longPending = pendingVisible && now - dockPending!.sinceTs > LONG_PENDING;
 
-  const line = dockLine?.icon === "pending" ? dockLine : dockLine;
-  const text = line?.text ?? "";
+  const icon = pendingVisible ? "pending" : (dockLine?.icon ?? null);
+  const text = pendingVisible
+    ? longPending
+      ? `${dockPending!.tool}: ${dockPending!.command} — дольше 10 с; история в drawer`
+      : dockPending!.text
+    : (dockLine?.text ?? "ИИ: ожидание — ручной режим");
   const tone =
-    line?.icon === "ok" || line?.icon === "inspect"
+    icon === "ok" || icon === "inspect"
       ? "text-success"
-      : line?.icon === "timeout"
+      : icon === "timeout" || icon === "pending"
         ? "text-warning"
-        : line?.icon === "error"
+        : icon === "error"
           ? "text-destructive"
           : "text-card-foreground";
 
@@ -45,13 +51,11 @@ export function AiDock() {
         aria-hidden
         className={cn(
           "size-2 rounded-full",
-          pendingVisible ? "bg-warning animate-pulse" : "bg-muted-foreground",
+          pendingVisible ? "bg-warning animate-pulse" : icon === "ok" || icon === "inspect" ? "bg-success" : "bg-muted-foreground",
         )}
       />
-      <span className={cn("min-w-0 flex-1 truncate", tone)}>
-        {pendingVisible && longPending
-          ? `${dockPending!.tool}: ${dockPending!.command} — дольше 10 с; история в drawer`
-          : text || "ИИ: ожидание — ручной режим"}
+      <span className={cn("min-w-0 flex-1 truncate", tone)} title={text}>
+        {text}
       </span>
       {dockBackground > 0 ? (
         <span className="text-muted-foreground">фоновых: {dockBackground}</span>

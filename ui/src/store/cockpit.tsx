@@ -2,13 +2,15 @@
  * Центральный store кокпита (спека ui-screens-v0.md §0–§3):
  * - источники данных: get_bus_state (pull) + события bus_log/suggestion_updated/
  *   host_status; локальный React-state — только эфемерщина (§0.2);
- * - AI Dock: pending-строка рисуется локально с момента вызова (спека §3,
- *   bus_log не имеет «start»), показывает себя только после 300 мс
- *   (трёхуровневая индикация), никогда не модальные спиннеры;
- * - ошибки = toast + кнопка-фикс из каталога §6; таймаут ядро разбирает сам
- *   (⏱ → inspect → ✓), UI не ретраит;
- * - [отменить] в Dock v0 = «отменить показ»: скрыть строку и игнорировать
- *   последующий suggestion_updated этой операции (семантика §3).
+ * - AI Dock: цикл строки ведёт обёртка команды — pending рисуется локально с
+ *   момента вызова (bus_log не имеет «start») и виден после 300 мс, итог —
+ *   по завершении. bus_log лишь уточняет (таймаут → ⏱ → inspect), поэтому
+ *   порядок «ответ / событие» на проводе не важен — строка не залипает;
+ * - параллельные операции считаются каждая (фоновых: N−1), в Dock — последняя;
+ * - ошибки = toast + кнопка-фикс из каталога §6; таймаут ядро разбирает само,
+ *   UI не ретраит;
+ * - [отменить] в Dock v0 = «отменить показ»: скрыть строку. Данные операции
+ *   всё равно приходят — ядро её уже выполнило (семантика §3).
  */
 import {
   createContext,
@@ -22,71 +24,104 @@ import {
 } from "react";
 import { useApi } from "@/ipc/api";
 import type {
+  AcceptPartOutput,
+  BounceResult,
   BusLogEvent,
   BusState,
   PartId,
+  SelfCheckReport,
   Suggestion,
   SuggestionUpdatedEvent,
   XRayReport,
-  SelfCheckReport,
 } from "@/types/contract";
+import {
+  PARTS,
+  PART_ORDER,
+  chipParams,
+  defaultChips,
+  paramDiff,
+  resolveMusicContext,
+  toolParams,
+  type ChipValues,
+  type MusicContext,
+} from "@/lib/parts";
+import { fmt } from "@/lib/format";
 
 // ─── Типы состояния ─────────────────────────────────────────────────────────
 
 export interface ChannelVersion {
   suggestion: Suggestion;
+  /** Решение по версии: ответ accept/reject или событие suggestion_updated. */
   decision?: "accepted" | "rejected";
-  /** Номер дорожки хоста после accept (ответ accept_part). */
+  /** Дорожки хоста после accept (imported_tracks — имена дорожек движка). */
   trackId?: string;
 }
 
 export interface ChannelState {
-  /** idle → generating → ready (+ error); accepted выводится из версий. */
+  /** idle → generating → ready (+ error); accepted/rejected живут в версиях. */
   status: "idle" | "generating" | "ready" | "error";
   versions: ChannelVersion[];
-  /** Версия, выбранная в VersionHistory (null = последняя). */
+  /** Версия, выбранная в истории; null = последняя. */
   selectedVersion: number | null;
   error: string | null;
-  /** Текущие чипы канала (словарь midi-gen v3, спека S3). */
-  params: Record<string, unknown>;
-  /** Видимый diff регенерации: «style: basic → syncopated». */
+  /** Чипы, применённые в последней версии (из suggestion.params). */
+  params: ChipValues;
+  /** Видимый diff последней регенерации: «style: basic → syncopated». */
   chipDiff: string | null;
 }
 
 export interface ToastItem {
   id: number;
   text: string;
+  tone?: "error" | "ok";
   /** Главная кнопка-фикс из каталога §6 (или undefined — только закрыть). */
   fixLabel?: string;
   fix?: () => void;
 }
 
 export interface DockLine {
-  icon: "pending" | "ok" | "timeout" | "error" | "inspect";
+  icon: "ok" | "timeout" | "error" | "inspect";
   text: string;
   ts: number;
 }
 
-const emptyChannel = (): ChannelState => ({
+export interface DockPending {
+  tool: string;
+  command: string;
+  sinceTs: number;
+  text: string;
+}
+
+/** Активная команда: пока идёт — pending-строка Dock. */
+interface Op {
+  command: string;
+  startedAt: number;
+  dismissed: boolean;
+  pending: DockPending;
+}
+
+interface RunOptions<T> {
+  /** Ошибку показывает вызывающий (error-state панели) — без toast. */
+  quiet?: boolean;
+  onError?: (text: string) => void;
+  /** Хвост итоговой строки Dock: «→ слой бас v1». */
+  effect?: (result: T) => string;
+  /** Уточнение фразы pending: «изменено: style». */
+  detail?: string;
+  /** Кнопка-фикс в toast (без неё toast закрывается, но не чинит). */
+  retry?: () => void;
+}
+
+const emptyChannel = (part: PartId): ChannelState => ({
   status: "idle",
   versions: [],
   selectedVersion: null,
   error: null,
-  params: {},
+  params: defaultChips(part),
   chipDiff: null,
 });
 
 // ─── Словарь AI Dock (спека §3) ─────────────────────────────────────────────
-
-const DOCK_VERB: Record<string, string> = {
-  analyze_loop: "слушаю луп",
-  generate_part: "генерирую партию",
-  regenerate: "перегенерирую",
-  accept_part: "передаю в сессию",
-  reject_part: "отклоняю версию",
-  run_self_check: "проверяю микс",
-  adopt_loop: "применяю настройки лупа",
-};
 
 const DOCK_TOOL: Record<string, string> = {
   analyze_loop: "audio-analyzer",
@@ -96,22 +131,45 @@ const DOCK_TOOL: Record<string, string> = {
   accept_part: "soundcraft",
   reject_part: "soundcraft",
   adopt_loop: "soundcraft",
+  bounce: "soundcraft",
 };
 
-function dockVerb(command: string, arg?: string): string {
-  if (command === "generate_part" && arg) return `генерирую ${arg}`;
-  if (command === "regenerate" && arg) return `перегенерирую (изменено: ${arg})`;
-  return DOCK_VERB[command] ?? command;
+function dockVerb(command: string, arg?: string, detail?: string): string {
+  switch (command) {
+    case "analyze_loop":
+      return "слушаю луп";
+    case "generate_part":
+      return `генерирую ${arg ?? "партию"}`;
+    case "regenerate":
+      return `перегенерирую${arg ? ` ${arg}` : ""}${detail ? ` (изменено: ${detail})` : ""}`;
+    case "accept_part":
+      return `передаю в сессию: ${arg ?? ""}`;
+    case "reject_part":
+      return `отклоняю версию: ${arg ?? ""}`;
+    case "adopt_loop":
+      return "применяю настройки лупа";
+    case "run_self_check":
+      return "проверяю микс";
+    case "bounce":
+      return "рендерю микс";
+    default:
+      return command;
+  }
 }
 
-/** Эффект в итоговой строке ✓ (спека §3: «→ слой bass v1» и т.п.). */
-function dockEffect(command: string, arg?: string): string | undefined {
-  if (command.startsWith("generate_part") && arg) return `→ слой ${arg}`;
-  if (command.startsWith("regenerate") && arg) return `→ слой ${arg} обновлён`;
-  if (command.startsWith("accept_part") && arg) return `→ дорожка ${arg}`;
-  if (command === "adopt_loop") return "→ сессия обновлена";
-  return undefined;
+/** Ядро отдаёт ошибки текстом JSON-RPC; транспорт может reject-нуть чем угодно. */
+function errorText(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error) ?? String(error);
+  } catch {
+    return String(error);
+  }
 }
+
+const basename = (path: string) => path.split("/").pop() ?? path;
+const NO_CONTEXT = "Сначала разбери луп: темп и тональность партий берутся из Loop X-Ray";
 
 // ─── Контекст ───────────────────────────────────────────────────────────────
 
@@ -124,18 +182,33 @@ export interface CockpitStore {
   analyzing: boolean;
   xray: XRayReport | null;
   xrayError: string | null;
+  dismissXrayError: () => void;
+  /** Темп, выбранный в сегменте гипотез (null = bpm отчёта). */
+  selectedBpm: number | null;
+  selectBpm: (bpm: number | null) => void;
+  adopting: boolean;
   // S3
   channels: Record<PartId, ChannelState>;
+  /** Темп и тональность партий: сессия движка, пока нет — Loop X-Ray. */
+  musicContext: MusicContext | null;
+  /** Момент запроса внимания к Rack (обводка) — навигация из X-Ray. */
+  rackFocusAt: number;
+  requestRackFocus: () => void;
+  selectChannelVersion: (part: PartId, version: number | null) => void;
   // S6
   checking: boolean;
   selfCheck: SelfCheckReport | null;
+  selfCheckPath: string | null;
   selfCheckError: string | null;
+  /** Среда умеет рендерить микс, и в сессии есть дорожки. */
+  canBounce: boolean;
+  bouncing: boolean;
   // S7
   busLog: BusLogEvent[];
   drawerOpen: boolean;
   setDrawerOpen: (open: boolean) => void;
   // AI Dock
-  dockPending: { tool: string; command: string; sinceTs: number } | null;
+  dockPending: DockPending | null;
   dockLine: DockLine | null;
   dockBackground: number;
   dismissDock: () => void;
@@ -145,14 +218,18 @@ export interface CockpitStore {
   dismissToast: (id: number) => void;
   // действия (обёртки команд: pending-строка + bus_log + toasts)
   analyzeLoop: (path: string, copyIntoWorkspace?: boolean) => Promise<void>;
+  retryAnalyze: (copyIntoWorkspace?: boolean) => Promise<void>;
   adoptLoop: (bpm: number, key: string) => Promise<void>;
-  generatePart: (tool: PartId, params: Record<string, unknown>) => Promise<void>;
-  regenerate: (part: PartId, diff: Record<string, unknown>, label: string) => Promise<void>;
+  /** Первая генерация канала → generate_part. */
+  generatePart: (part: PartId, chips: ChipValues) => Promise<void>;
+  /** Новая версия с изменёнными чипами → regenerate (diff только изменений). */
+  regenerate: (part: PartId, chips: ChipValues) => Promise<void>;
   acceptPart: (part: PartId, version: number) => Promise<void>;
   rejectPart: (part: PartId, version: number) => Promise<void>;
   runSelfCheck: (bouncePath: string) => Promise<void>;
+  /** Рендер микса движком → Self-Check (вне контракта v0.2, C3). */
+  bounceAndCheck: () => Promise<void>;
   refreshBusState: () => Promise<void>;
-  selectChannelVersion: (part: PartId, version: number | null) => void;
 }
 
 const StoreContext = createContext<CockpitStore | null>(null);
@@ -164,34 +241,44 @@ export function useCockpit(): CockpitStore {
 }
 
 let toastSeq = 1;
-let opSeq = 1;
 
 export function CockpitProvider({ children }: { children: ReactNode }) {
   const api = useApi();
-  const [hostStatus, setHostStatus] = useState<BusState["engine"]>("up");
+  const [hostStatus, setHostStatus] = useState<BusState["engine"]>("waking");
   const [busState, setBusState] = useState<BusState | null>(null);
   const [loopFile, setLoopFile] = useState<{ name: string; path: string } | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [xray, setXray] = useState<XRayReport | null>(null);
   const [xrayError, setXrayError] = useState<string | null>(null);
+  const [selectedBpm, setSelectedBpm] = useState<number | null>(null);
+  const [adopting, setAdopting] = useState(false);
   const [channels, setChannels] = useState<Record<PartId, ChannelState>>({
-    bass: emptyChannel(),
-    chords: emptyChannel(),
-    drums: emptyChannel(),
+    bass: emptyChannel("bass"),
+    chords: emptyChannel("chords"),
+    drums: emptyChannel("drums"),
   });
   const [checking, setChecking] = useState(false);
   const [selfCheck, setSelfCheck] = useState<SelfCheckReport | null>(null);
+  const [selfCheckPath, setSelfCheckPath] = useState<string | null>(null);
   const [selfCheckError, setSelfCheckError] = useState<string | null>(null);
+  const [bouncing, setBouncing] = useState(false);
   const [busLog, setBusLog] = useState<BusLogEvent[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [dockPending, setDockPending] = useState<CockpitStore["dockPending"]>(null);
+  const [dockPending, setDockPending] = useState<DockPending | null>(null);
   const [dockLine, setDockLine] = useState<DockLine | null>(null);
   const [dockBackground, setDockBackground] = useState(0);
+  const [rackFocusAt, setRackFocusAt] = useState(0);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
-  const pendingRef = useRef<{ id: number; command: string; part?: PartId } | null>(null);
-  const ignoredOps = useRef<Set<number>>(new Set());
-  const pendingTimer = useRef<number | undefined>(undefined);
+  const inflight = useRef<Op[]>([]);
+  const lastAttempt = useRef<{ path: string; copy: boolean } | null>(null);
+  // Свежие снимки для колбэков команд — без лишних зависимостей у useCallback
+  const live = useRef({ channels, loopFile });
+  live.current = { channels, loopFile };
+  const musicContext = useMemo(
+    () => resolveMusicContext(busState, xray, selectedBpm),
+    [busState, xray, selectedBpm],
+  );
 
   const pushToast = useCallback((t: Omit<ToastItem, "id">) => {
     setToasts((list) => [...list.slice(-2), { ...t, id: toastSeq++ }]);
@@ -200,67 +287,79 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     setToasts((list) => list.filter((t) => t.id !== id));
   }, []);
 
+  const refreshBusState = useCallback(async () => {
+    try {
+      const next = await api.getBusState();
+      setBusState(next);
+      setHostStatus(next.engine);
+    } catch {
+      /* шелл ещё поднимается — состояние останется прежним, host_status поправит */
+    }
+  }, [api]);
+
+  const patchChannel = useCallback((part: PartId, patch: (c: ChannelState) => ChannelState) => {
+    setChannels((map) => ({ ...map, [part]: patch(map[part]) }));
+  }, []);
+
   // События ядра → состояние (спека §0.2)
   useEffect(() => {
     const un1 = api.onBusLog((event) => {
       setBusLog((log) => [...log.slice(-199), event]);
-      setDockBackground((n) => Math.max(0, n - 1));
-      const pending = pendingRef.current;
-      if (pending && event.command.startsWith(pending.command.split(" ")[0])) {
-        pendingRef.current = null;
-        setDockPending(null);
-        window.clearTimeout(pendingTimer.current);
-        if (event.status === "ok") {
-          setDockLine({
-            icon: "ok",
-            ts: event.ts,
-            text: `✓ ${event.tool}: ${event.command} — готово · ${(event.ms / 1000).toFixed(1)} с`,
-          });
-        } else if (event.status === "timeout") {
+      const op = inflight.current.find((o) => o.pending.command === event.command);
+      if (op) {
+        // таймаут ≠ отказ: ядро само делает inspect — UI ждёт его вердикта
+        if (event.status === "timeout" && !op.dismissed) {
           setDockLine({
             icon: "timeout",
             ts: event.ts,
-            text: `⏱ ${event.tool}: ${event.command} — таймаут 30 с → проверяю состояние…`,
-          });
-        } else {
-          setDockLine({
-            icon: "error",
-            ts: event.ts,
-            text: `✗ ${event.tool}: ${event.command} — ошибка · подробнее в drawer`,
+            text: `⏱ ${event.tool}: ${event.command} — таймаут → проверяю состояние…`,
           });
         }
-      } else if (pendingRef.current === null) {
-        // внешний агент или inspect ядра — виден в dock как итоговая строка
-        if (event.tool === "core" && event.command.startsWith("inspect")) {
-          setDockLine({
-            icon: "inspect",
-            ts: event.ts,
-            text: `✓ inspect — операция прошла, ответ потерян`,
-          });
-        }
+        return;
+      }
+      if (inflight.current.length === 0 && event.tool === "core" && event.command.startsWith("inspect")) {
+        setDockLine({
+          icon: "inspect",
+          ts: event.ts,
+          text: "✓ inspect — операция прошла, ответ потерян",
+        });
       }
     });
     const un2 = api.onSuggestionUpdated((event: SuggestionUpdatedEvent) => {
       setChannels((map) => {
-        const channel = { ...map[event.part] };
-        if (channel.status === "generating") channel.status = "ready";
-        const at = channel.versions.findIndex(
-          (v) => v.suggestion.version === event.version,
-        );
+        const base = map[event.part];
+        const s = event.suggestion;
+        const decision =
+          s.status === "accepted" || s.status === "rejected" ? s.status : undefined;
+        const at = base.versions.findIndex((v) => v.suggestion.version === event.version);
+        const versions = [...base.versions];
         if (at >= 0) {
-          channel.versions = [...channel.versions];
-          channel.versions[at] = {
-            ...channel.versions[at],
-            suggestion: event.suggestion,
-          };
+          versions[at] = { ...versions[at], suggestion: s, decision: decision ?? versions[at].decision };
         } else {
-          channel.versions = [...channel.versions, { suggestion: event.suggestion }];
+          versions.push({ suggestion: s, decision });
         }
-        return { ...map, [event.part]: channel };
+        return {
+          ...map,
+          [event.part]: {
+            ...base,
+            versions,
+            params: chipParams(event.part, s.params),
+            selectedVersion: null,
+            error: null,
+          },
+        };
       });
     });
     const un3 = api.onHostStatus((event) => {
       setHostStatus(event.engine);
+      // при спящем движке сессии нет — поля обнуляются (примечание 6 контракта)
+      setBusState((prev) =>
+        event.engine === "up"
+          ? prev
+          : prev
+            ? { ...prev, engine: event.engine, tempo: null, key_marker: null, session_name: null }
+            : prev,
+      );
       if (event.engine === "up") void refreshBusState();
     });
     void refreshBusState();
@@ -269,194 +368,305 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       un2();
       un3();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api]);
+  }, [api, refreshBusState]);
 
-  const refreshBusState = useCallback(async () => {
-    const state = await api.getBusState();
-    setBusState(state);
-    setHostStatus(state.engine);
-  }, [api]);
-
-  /** Обёртка команды: pending-строка Dock (через 300 мс) + toast на ошибку. */
+  /** Обёртка команды: pending-строка Dock (видна после 300 мс) + итог + toast на ошибку. */
   const run = useCallback(
-    async <T,>(command: string, arg: string | undefined, fn: () => Promise<T>): Promise<T | undefined> => {
-      const id = opSeq++;
+    async <T,>(
+      command: string,
+      arg: string | undefined,
+      fn: () => Promise<T>,
+      options: RunOptions<T> = {},
+    ): Promise<T | undefined> => {
       const tool = DOCK_TOOL[command] ?? "core";
-      pendingRef.current = { id, command };
-      setDockBackground((n) => n + 1);
+      const title = `${command}${arg ? ` (${arg})` : ""}`;
+      const op: Op = {
+        command,
+        startedAt: performance.now(),
+        dismissed: false,
+        pending: {
+          tool,
+          command,
+          sinceTs: Date.now(),
+          text: `● ${tool}: ${title} — ${dockVerb(command, arg, options.detail)}…`,
+        },
+      };
+      const finish = (line: DockLine | null) => {
+        inflight.current = inflight.current.filter((o) => o !== op);
+        const rest = inflight.current.at(-1);
+        setDockBackground(Math.max(0, inflight.current.length - 1));
+        if (rest) {
+          setDockPending(rest.pending);
+        } else {
+          setDockPending(null);
+          if (!op.dismissed) setDockLine(line);
+        }
+      };
+      inflight.current.push(op);
+      setDockBackground(Math.max(0, inflight.current.length - 1));
       setDockLine(null);
-      pendingTimer.current = window.setTimeout(() => {
-        setDockPending({ tool, command, sinceTs: Date.now() });
-        setDockLine({
-          icon: "pending",
-          ts: Date.now(),
-          text: `● ${tool}: ${command}${arg ? ` (${arg})` : ""} — ${dockVerb(command, arg)}…`,
-        });
-      }, 300);
+      setDockPending(op.pending);
       try {
         const result = await fn();
+        const secs = fmt((performance.now() - op.startedAt) / 1000);
+        const tail = options.effect?.(result);
+        finish({
+          icon: "ok",
+          ts: Date.now(),
+          text: `✓ ${tool}: ${title} — готово · ${secs} с${tail ? ` ${tail}` : ""}`,
+        });
         return result;
       } catch (error) {
-        const text = error instanceof Error ? error.message : String(error);
-        pushToast({ text, fixLabel: "Повторить" });
-        setDockLine({
-          icon: "error",
-          ts: Date.now(),
-          text: `✗ ${tool}: ${command} — ${text}`,
-        });
+        const text = errorText(error);
+        finish({ icon: "error", ts: Date.now(), text: `✗ ${tool}: ${title} — ${text}` });
+        if (!options.quiet) pushToast({ text, fixLabel: "Повторить", fix: options.retry });
+        options.onError?.(text);
         return undefined;
-      } finally {
-        pendingRef.current = null;
-        setDockPending(null);
-        window.clearTimeout(pendingTimer.current);
       }
     },
     [pushToast],
   );
 
   const analyzeLoop = useCallback(
-    async (path: string, copyIntoWorkspace?: boolean) => {
+    async (path: string, copyIntoWorkspace = false) => {
+      lastAttempt.current = { path, copy: copyIntoWorkspace };
       setAnalyzing(true);
       setXrayError(null);
-      const report = await run("analyze_loop", undefined, () =>
-        api.analyzeLoop({ path, copy_into_workspace: copyIntoWorkspace }),
+      const report = await run(
+        "analyze_loop",
+        undefined,
+        () => api.analyzeLoop({ path, copy_into_workspace: copyIntoWorkspace }),
+        {
+          quiet: true,
+          onError: setXrayError,
+          effect: (r) => `→ ${fmt(r.bpm)} BPM · ${r.key}`,
+        },
       );
       setAnalyzing(false);
       if (report) {
         setXray(report);
-        setLoopFile({ name: path.split("/").pop() ?? "loop", path });
-      } else {
-        setXrayError("Анализ не удался");
+        setSelectedBpm(null);
+        setLoopFile({ name: basename(path), path });
       }
     },
     [api, run],
   );
 
+  const retryAnalyze = useCallback(
+    async (copyIntoWorkspace?: boolean) => {
+      const last = lastAttempt.current;
+      if (last) await analyzeLoop(last.path, copyIntoWorkspace ?? last.copy);
+    },
+    [analyzeLoop],
+  );
+
   const adoptLoop = useCallback(
     async (bpm: number, key: string) => {
-      const result = await run("adopt_loop", undefined, () =>
-        api.adoptLoop({ bpm, key, source: loopFile?.path ?? "loop" }),
+      setAdopting(true);
+      const result = await run(
+        "adopt_loop",
+        undefined,
+        () => api.adoptLoop({ bpm, key, source: live.current.loopFile?.path ?? "loop" }),
+        {
+          effect: (r) => `→ сессия: ${fmt(r.tempo)} BPM · ${r.marker}`,
+          retry: () => void adoptLoop(bpm, key),
+        },
       );
+      setAdopting(false);
       if (result) await refreshBusState();
     },
-    [api, loopFile, refreshBusState, run],
+    [api, refreshBusState, run],
   );
 
   const generatePart = useCallback(
-    async (tool: PartId, params: Record<string, unknown>) => {
-      setChannels((map) => ({
-        ...map,
-        [tool]: { ...map[tool], status: "generating", error: null, params },
-      }));
-      const suggestion = await run("generate_part", tool, () =>
-        api.generatePart({ tool, params }),
+    async (part: PartId, chips: ChipValues) => {
+      if (!musicContext || musicContext.bpm == null) {
+        pushToast({ text: NO_CONTEXT });
+        return;
+      }
+      const name = PARTS[part].accusative;
+      const ctx = musicContext;
+      patchChannel(part, (c) => ({ ...c, status: "generating", error: null }));
+      await run(
+        "generate_part",
+        name,
+        () => api.generatePart({ tool: part, params: toolParams(part, chips, ctx) }),
+        {
+          quiet: true,
+          onError: (text) =>
+            patchChannel(part, (c) =>
+              c.status === "generating" ? { ...c, status: "error", error: text } : c,
+            ),
+          effect: (s) => `→ слой ${PARTS[s.part].accusative} v${s.version}`,
+        },
       );
-      setChannels((map) => {
-        const channel = { ...map[tool] };
-        if (channel.status === "generating") {
-          channel.status = suggestion ? "ready" : "error";
-          channel.error = suggestion ? null : "Генерация не удалась";
-        }
-        return { ...map, [tool]: channel };
-      });
+      patchChannel(part, (c) => (c.status === "generating" ? { ...c, status: "ready" } : c));
     },
-    [api, run],
+    [api, musicContext, patchChannel, pushToast, run],
   );
 
   const regenerate = useCallback(
-    async (part: PartId, diff: Record<string, unknown>, label: string) => {
-      const channel = channels[part];
+    async (part: PartId, chips: ChipValues) => {
+      const last = live.current.channels[part].versions.at(-1)?.suggestion;
+      if (!last) {
+        await generatePart(part, chips);
+        return;
+      }
+      if (!musicContext || musicContext.bpm == null) {
+        pushToast({ text: NO_CONTEXT });
+        return;
+      }
+      const name = PARTS[part].accusative;
+      const { diff, label, keys } = paramDiff(part, last.params, chips, musicContext);
+      patchChannel(part, (c) => ({ ...c, status: "generating", error: null }));
+      const ok = await run(
+        "regenerate",
+        name,
+        () => api.regenerate({ part, params_diff: diff }),
+        {
+          quiet: true,
+          detail: keys.length ? keys.join(", ") : undefined,
+          onError: (text) =>
+            patchChannel(part, (c) =>
+              c.status === "generating" ? { ...c, status: "error", error: text } : c,
+            ),
+          effect: (s) => `→ слой ${PARTS[s.part].accusative} обновлён (v${s.version})`,
+        },
+      );
+      const chipDiff = ok ? label || null : undefined;
+      patchChannel(part, (c) => ({
+        ...c,
+        status: c.status === "generating" ? "ready" : c.status,
+        chipDiff: chipDiff === undefined ? c.chipDiff : chipDiff,
+      }));
+    },
+    [api, generatePart, musicContext, patchChannel, pushToast, run],
+  );
+
+  const decide = useCallback(
+    (part: PartId, version: number, decision: "accepted" | "rejected", trackId?: string) => {
       setChannels((map) => ({
         ...map,
-        [part]: { ...map[part], status: "generating", error: null, chipDiff: label },
+        [part]: {
+          ...map[part],
+          selectedVersion: null,
+          versions: map[part].versions.map((v) =>
+            v.suggestion.version === version ? { ...v, decision, trackId } : v,
+          ),
+        },
       }));
-      const suggestion = await run("regenerate", `${part}, ${label}`, () =>
-        api.regenerate({ part, params_diff: diff }),
-      );
-      setChannels((map) => {
-        const next = { ...map[part] };
-        if (next.status === "generating") {
-          next.status = suggestion ? "ready" : "error";
-          next.error = suggestion ? null : "Генерация не удалась";
-          next.chipDiff = suggestion ? label : next.chipDiff;
-        }
-        return { ...map, [part]: next };
-      });
-      void channel;
     },
-    [api, channels, run],
+    [],
   );
 
   const acceptPart = useCallback(
     async (part: PartId, version: number) => {
-      const result = await run("accept_part", `${part} v${version}`, () =>
-        api.acceptPart({ part, version }),
+      const name = PARTS[part].accusative;
+      const result = await run(
+        "accept_part",
+        `${name} v${version}`,
+        () => api.acceptPart({ part, version }),
+        {
+          effect: (r: AcceptPartOutput) => `→ дорожка ${r.imported_tracks.join(", ") || "создана"}`,
+          retry: () => void acceptPart(part, version),
+        },
       );
       if (!result) return;
-      const trackId = result.imported_tracks[0];
-      setChannels((map) => {
-        const channel = { ...map[part] };
-        channel.versions = channel.versions.map((v) =>
-          v.suggestion.version === version
-            ? { ...v, decision: "accepted" as const, trackId }
-            : v,
-        );
-        return { ...map, [part]: channel };
-      });
-      pushToast({
-        text: `✓ ${part} v${version} принят — дорожка ${trackId}`,
-      });
+      const trackId = result.imported_tracks.join(", ");
+      decide(part, version, "accepted", trackId);
+      pushToast({ tone: "ok", text: `✓ ${name} v${version} в сессии — ${trackId || "дорожка создана"}` });
       await refreshBusState();
     },
-    [api, pushToast, refreshBusState, run],
+    [api, decide, pushToast, refreshBusState, run],
   );
 
   const rejectPart = useCallback(
     async (part: PartId, version: number) => {
-      const ok = await run("reject_part", `${part} v${version}`, () =>
-        api.rejectPart({ part, version }),
+      const name = PARTS[part].accusative;
+      // void не отличить от ошибки — успех маркируем сами
+      const ok = await run(
+        "reject_part",
+        `${name} v${version}`,
+        () => api.rejectPart({ part, version }).then(() => true as const),
+        {
+          effect: () => "→ версия отклонена",
+          retry: () => void rejectPart(part, version),
+        },
       );
-      if (ok === undefined) return;
-      setChannels((map) => {
-        const channel = { ...map[part] };
-        channel.versions = channel.versions.map((v) =>
-          v.suggestion.version === version
-            ? { ...v, decision: "rejected" as const }
-            : v,
-        );
-        return { ...map, [part]: channel };
-      });
+      if (ok) decide(part, version, "rejected");
     },
-    [api, run],
+    [api, decide, run],
   );
 
   const runSelfCheck = useCallback(
     async (bouncePath: string) => {
       setChecking(true);
       setSelfCheckError(null);
-      const report = await run("run_self_check", undefined, () =>
-        api.runSelfCheck({ bounce_path: bouncePath }),
+      const report = await run(
+        "run_self_check",
+        undefined,
+        () => api.runSelfCheck({ bounce_path: bouncePath }),
+        {
+          quiet: true,
+          onError: setSelfCheckError,
+          effect: (r) => `→ итог: ${r.verdict}`,
+        },
       );
       setChecking(false);
-      if (report) setSelfCheck(report);
-      else setSelfCheckError("Проверка не удалась");
+      if (report) {
+        setSelfCheck(report);
+        setSelfCheckPath(bouncePath);
+      }
     },
     [api, run],
   );
 
+  const bounceAndCheck = useCallback(async () => {
+    const bounce = api.bounce;
+    if (!bounce) return;
+    // Рендер пишется рядом со стейджингом партий — эта папка заведомо внутри
+    // песочницы движка; без партий остаётся папка лупа.
+    const staged = PART_ORDER.find(
+      (p) => typeof live.current.channels[p].versions.at(-1)?.suggestion.params.output_path === "string",
+    );
+    const anchor = staged
+      ? String(live.current.channels[staged].versions.at(-1)?.suggestion.params.output_path)
+      : live.current.loopFile?.path;
+    if (!anchor) {
+      pushToast({ text: "Некуда писать рендер: сначала разбери луп или сгенерируй партию" });
+      return;
+    }
+    const path = anchor.replace(/[^/]*$/, "l2t_mix_bounce.wav");
+    setBouncing(true);
+    const result = await run<BounceResult>(
+      "bounce",
+      undefined,
+      () => bounce(path),
+      {
+        effect: (r) => `→ ${fmt(r.seconds)} с · ${fmt(r.lufs)} LUFS`,
+        retry: () => void bounceAndCheck(),
+      },
+    );
+    setBouncing(false);
+    if (result) await runSelfCheck(result.path || path);
+  }, [api, pushToast, run, runSelfCheck]);
+
   const dismissDock = useCallback(() => {
-    // v0: «отменить показ» — скрываем строку; текущую операцию помечаем
-    // игнорируемой (последующий suggestion_updated не отрисуется заново)
-    if (pendingRef.current) ignoredOps.current.add(pendingRef.current.id);
-    pendingRef.current = null;
+    // v0: «отменить показ» — строка уходит, операция в ядре продолжается
+    inflight.current.forEach((o) => {
+      o.dismissed = true;
+    });
     setDockPending(null);
     setDockLine(null);
   }, []);
 
+  const dismissXrayError = useCallback(() => setXrayError(null), []);
+
+  const requestRackFocus = useCallback(() => setRackFocusAt(Date.now()), []);
+
   const selectChannelVersion = useCallback((part: PartId, version: number | null) => {
-    setChannels((map) => ({ ...map, [part]: { ...map[part], selectedVersion: version } }));
-  }, []);
+    patchChannel(part, (c) => ({ ...c, selectedVersion: version }));
+  }, [patchChannel]);
 
   const value = useMemo<CockpitStore>(
     () => ({
@@ -466,10 +676,22 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       analyzing,
       xray,
       xrayError,
+      dismissXrayError,
+      selectedBpm,
+      selectBpm: setSelectedBpm,
+      adopting,
       channels,
+      musicContext,
+      rackFocusAt,
+      requestRackFocus,
+      selectChannelVersion,
       checking,
       selfCheck,
+      selfCheckPath,
       selfCheckError,
+      canBounce:
+        typeof api.bounce === "function" && busState?.engine === "up" && (busState.tracks?.length ?? 0) > 0,
+      bouncing,
       busLog,
       drawerOpen,
       setDrawerOpen,
@@ -481,25 +703,25 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       pushToast,
       dismissToast,
       analyzeLoop,
+      retryAnalyze,
       adoptLoop,
       generatePart,
       regenerate,
       acceptPart,
       rejectPart,
       runSelfCheck,
+      bounceAndCheck,
       refreshBusState,
-      selectChannelVersion,
     }),
     [
-      hostStatus, busState, loopFile, analyzing, xray, xrayError, channels, checking,
-      selfCheck, selfCheckError, busLog, drawerOpen, dockPending, dockLine,
-      dockBackground, dismissDock, toasts, pushToast, dismissToast, analyzeLoop,
-      adoptLoop, generatePart, regenerate, acceptPart, rejectPart, runSelfCheck,
-      refreshBusState, selectChannelVersion,
+      api, hostStatus, busState, loopFile, analyzing, xray, xrayError, dismissXrayError,
+      selectedBpm, adopting, channels, musicContext, rackFocusAt, requestRackFocus,
+      selectChannelVersion, checking, selfCheck, selfCheckPath, selfCheckError, bouncing,
+      busLog, drawerOpen, dockPending, dockLine, dockBackground, dismissDock, toasts,
+      pushToast, dismissToast, analyzeLoop, retryAnalyze, adoptLoop, generatePart,
+      regenerate, acceptPart, rejectPart, runSelfCheck, bounceAndCheck, refreshBusState,
     ],
   );
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }
-
-export { dockEffect };

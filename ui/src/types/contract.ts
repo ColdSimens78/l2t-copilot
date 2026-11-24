@@ -73,10 +73,14 @@ export interface XRayReport {
 
 export type BusEngine = "up" | "waking" | "down";
 
-/** Снимок DAW-сессии — выход get_bus_state (v0.2: + session_name, C6). */
+/**
+ * Снимок DAW-сессии — выход get_bus_state (v0.2: + session_name, C6).
+ * Примечание 6 контракта: при engine: "down" поля tempo и key_marker
+ * приходят null — сессии нет. key_marker — по конвенции имени «Key: <тональность>».
+ */
 export interface BusState {
-  tempo: number;
-  key_marker: string;
+  tempo: number | null;
+  key_marker: string | null;
   tracks: unknown[];
   engine: BusEngine;
   /** Имя открытой сессии хоста для TopBar; null, если движок не поднялся. */
@@ -190,6 +194,19 @@ export function previewWavPath(stagingDir: string, part: PartId, version: number
 export interface DawRenderInput {
   path: string;
   normalize: boolean;
+}
+
+/**
+ * ВНЕ таблицы v0.2: рендер микса движком (file.bounce_mix) — форма ответа
+ * контракт-теста движка, шесть полей. normalize движок не принимает.
+ */
+export interface BounceResult {
+  path: string;
+  bytes: number;
+  seconds: number;
+  lufs: number;
+  peak_db: number;
+  true_peak_db: number;
 }
 
 // ─── Events (ядро → UI) ────────────────────────────────────────────────────
