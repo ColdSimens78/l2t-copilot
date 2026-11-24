@@ -568,12 +568,6 @@ async fn working_session_lifecycle_and_persistence() {
     let ws = std::env::temp_dir().join("l2t-lifecycle-ws");
     let _ = std::fs::remove_dir_all(&ws);
     std::fs::create_dir_all(&ws).unwrap();
-    // партия внутри roots движка
-    std::fs::copy(
-        "/home/ilmir/.zcode/workspace/24b4fa4d-9864-4ddb-ae9c-49a5325fd9bf/bass_am90.mid",
-        ws.join("bass_am90.mid"),
-    )
-    .unwrap();
     let engine_cfg = ServerConfig {
         name: "soundcraft",
         command: resolve_soundcraft().command,
@@ -583,6 +577,13 @@ async fn working_session_lifecycle_and_persistence() {
         ],
         env: HashMap::new(),
     };
+    if !engine_cfg.command.is_file() {
+        eprintln!(
+            "SKIP: soundcraft-cli не найден ({})",
+            engine_cfg.command.display()
+        );
+        return;
+    }
 
     let session = ws.join("cockpit.scraft");
     let staging = ws.join("staging");
