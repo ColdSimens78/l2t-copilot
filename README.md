@@ -1,201 +1,135 @@
-# L2T Copilot — Loop-to-Track Copilot
+# L2T Copilot
 
 [![CI](https://github.com/ColdSimens78/l2t-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/ColdSimens78/l2t-copilot/actions/workflows/ci.yml)
 
-> **🤖 100% кода этого репозитория написано AI-агентами.**
-> Человек задаёт видение и принимает решения; команда из пяти агентных
-> ролей (Lead, Desktop Engineer, Frontend Engineer, OSS Scout, UX Architect)
-> исследует, специфицирует, кодит, тестирует и документирует — под
-> обязательным ревью каждого коммита. Методология и цифры за 3 дня:
-> **[docs/ai-development.md](docs/ai-development.md)**
+Десктоп-приложение для музыкантов: кидаешь аудио-луп — оно определяет его
+BPM и тональность, генерирует под него бас, аккорды и ударные, показывает
+результат «призрачными нотами» в Piano Roll и раскладывает по сессии DAW.
+На выходе — обычный редактируемый MIDI и WAV. Никаких чёрных ящиков.
 
-**AI-нативный кокпит для музыканта: десктоп-приложение, которое превращает
-найденный аудио-луп в законченный, полностью редактируемый трек.**
+## Зачем
 
-> **Боль:** вы нашли классный луп, но не знаете его BPM и тональность, а час
-> на подбор баса, аккордов и бита убивает вдохновение.
-> **Ответ:** L2T слышит луп (BPM, тональность, LUFS, спектр), генерирует
-> гармонически совместимые партии — бас, аккорды, ударные — показывает их
-> **«призрачными нотами»** в Piano Roll и раскладывает по DAW одной кнопкой.
-> Всё остаётся редактируемым MIDI — вы владеете каждой нотой (не «чёрный
-> ящик» вроде генеративного аудио и не закрытые библиотеки аккордов).
+Сценарий знакомый: нашёл луп, но не знаешь его темп и тональность. Дальше
+час рутинной работы — подбор баса, прогрессия, бит, сведение. Идея
+проекта — отдать эту рутину агентам, а человеку оставить решения:
+что принять, что перегенерировать, что переписать руками. Всё, что
+предлагает ИИ, показывается прозрачным слоем до принятия и логируется
+— по этим данным считается метрика «доля принятых партий».
 
-## Статус: этап 2 закрыт — полный контур работает
+Против генеративного аудио (Suno и подобных) принцип простой: на выходе
+не «магия», а MIDI и WAV, которые можно переписать до последней ноты.
 
-Десктоп-окно (Tauri) → Rust-ядро → живой SoundCraft standalone (headless
-MCP): анализ лупа → генерация партий → превью (fluidsynth-сайдкар) →
-accept → импорт в сессию → bounce → Self-Check. Дорожка пройдена
-end-to-end и верифицирована (см. `docs/engine-spike-report.md`).
+## Как устроено
 
-## Архитектура: «Кокпит над шиной»
-
-**UI = проекция MCP-шины.** Кнопка = MCP-инструмент; у кокпита нет скрытой
-логики. Контрол-плейн (решения) отделён от дата-плейна (сэмплы ходят
-файлами через workspace, по MCP — только пути).
+Окно-кокпит (Tauri + React) общается с тремя сервисами через MCP,
+звуковым движком — через его CLI:
 
 ```
-┌────────────── L2T Cockpit (Tauri v2 + React, десктоп-окно) ─────────────┐
-│  Loop X-Ray · Стейджинг с «призрачными нотами» · Self-Check · AI Dock   │
-│  Rust-ядро (Tauri main) — единственный владелец MCP-клиентов (stdio),   │
-│  staging/manifest.json = инструментация метрики Acceptance Rate         │
-└──────────┬──────────────────────┬──────────────────────┬────────────────┘
-           │ stdio                │ stdio                │ stdio
-           ▼                      ▼                      ▼
-   ┌───────────────┐   ┌───────────────────┐   ┌──────────────────────────┐
-   │ audio-analyzer│   │ midi-gen          │   │ SoundCraft engine        │
-   │ «уши» (Rust)  │   │ «руки» (Python)   │   │ standalone CLI/MCP       │
-   │ BPM, тональ-  │   │ бас/аккорды/бит   │   │ (v0.20.1 headless)       │
-   │ ность, LUFS,  │   │ в тональности     │   │ сессия, темп-карта,      │
-   │ спектр        │   │ лупа, voice-led   │   │ импорт MIDI, bounce,     │
-   │               │   │                   │   │ undo, встроенные синты   │
-   └───────────────┘   └───────────────────┘   └──────────────────────────┘
-                        + qwen_bridge («Мозг»: локальный LLM, этап 4)
+┌──────────── L2T Cockpit (Tauri v2 + React) ────────────┐
+│  Loop X-Ray · Стейджинг с призрачными нотами ·         │
+│  Self-Check · метрика принятия                         │
+│  Rust-ядро: MCP-клиенты, staging manifest, превью      │
+└─────────┬──────────────────┬──────────────────┬────────┘
+          │ stdio            │ stdio            │ stdio
+          ▼                  ▼                  ▼
+  audio-analyzer      midi-gen           SoundCraft engine
+  (Rust, бинарь)      (Python)           (v0.20.1 headless)
+  BPM, ключ, LUFS     бас/аккорды/бит    сессия, импорт, bounce
 ```
 
-**SoundCraft остаётся движком, редактором нот и микшером** — кокпит готовит
-и предлагает, хост звучит и хранит. Никаких фейдеров в кокпите: до accept
-партия существует только в UI-слое и workspace, после accept — материа-
-лизуется дорожкой DAW (правило anti-dual-source, `docs/ipc-contract.md`).
+- **Анализ** — готовый бинарь [audio-analyzer-rs](https://github.com/JuzzyDee/audio-analyzer-rs):
+  темп с альтернативной гипотезой (×2 по хэтам показывается обеими),
+  тональность с относительной эквивалентностью (A minor ≡ C major),
+  LUFS до стриминговых целей.
+- **Генерация** — три детерминированных генератора: бас в 5 стилях,
+  аккорды с голосоведением (инверсии подбираются под минимальное
+  движение между соседними аккордами), ударные с филлами на каждом
+  четвёртом такте.
+- **Движок** — [SoundCraft](https://github.com/storytold/soundcraft)
+  standalone headless: холодный старт 0.15 с, импорт MIDI, bounce с LUFS
+  в ответе, песочница файловых путей встроена в сам движок.
 
-## Работает с любой DAW (и без неё)
-
-L2T — **компаньон к твоей DAW**, а не её замена и не плагин: самостоятельное
-десктоп-приложение (Windows/macOS/Linux — Tauri кроссплатформенен).
-
-- **Базовый контур самодостаточен**: анализ, генерация, превью и экспорт
-  работают без какой-либо DAW (Rust-анализатор + midi-gen + fluidsynth-
-  превью внутри приложения).
-- **Универсальная интеграция** — стандартные файлы: экспортируешь `.mid`
-  (партии) и `.wav` (баунс) — их понимают FL Studio, Ableton, Logic,
-  Reaper, Cubase. Drag&drop в твой DAW и дальше работаешь там.
-- **Глубокая интеграция** — адаптеры DawBackend для DAW с программным
-  управлением: SoundCraft (готов, авто-импорт/темп/undo), остальные —
-  по мере востребования.
-
-## Ключевые механизмы
-
-- **Призрачные ноты = контракт данных**: `suggestion = {notes[] (формат
-  midi_io), rationale, confidence, source_tool, params, status}`. Accept/
-  reject логируется в manifest → **метрика Acceptance Rate** (доля партий,
-  которые вы оставили) считается с первого дня, локально, без облака.
-- **Regenerate = видимый diff параметров** (`style: basic → syncopated`)
-  — регенерация от «ИИ-магии» превратилась в управляемую глубину.
-- **Self-Check = светофор доверия**: тональность (с relative-key
-  эквивалентностью A minor ≡ C major), темп (×2-гипотезы рядом), LUFS-дельта
-  до стриминговой цели, Δ полос «что добавили слои» против плана X-Ray.
-
-## Структура репозитория
-
-```
-crates/l2t-core/       Rust-ядро: MCP-клиенты (rmcp+tokio), типизированные
-                       IPC-фасады, staging/manifest, contract.rs, preview
-ui/                    Tauri v2 + React кокпит: CockpitApi, mock/tairi-адаптеры,
-                       ghost-piano-roll, панели (S0–S7 по спеке)
-src/mcp_servers/       MCP-серверы: midi_gen (генерация партий),
-                       qwen_bridge («Мозг»: локальный LLM qwen-stack)
-src/core/              общие контракты: keys (relative-key), midi_io
-tests/                 pytest: контракты генерации и midi_io (20 тестов)
-docs/                  PRD, спецификации, разведки, спайк-отчёты
-examples/              CC0-лупы для demo/e2e (лицензии проверены)
-DECISION.md            архитектурные решения и триггеры форка
-DEPENDENCIES.md        лицензионный манифест зависимостей (39 Py + 118 crates)
-```
+Кокпит работает и без DAW (анализ → генерация → превью → экспорт WAV),
+а с DAW — через стандартные файлы: `.mid` и `.wav` понимают FL Studio,
+Ableton, Logic, Reaper — перетащи и работай.
 
 ## Быстрый старт
 
-Требования и детали окружения: [`docs/frontend-env-setup.md`](docs/frontend-env-setup.md)
-(Debian 13: build-essential, webkit2gtk-4.1-dev, pkg-config, rustup, nvm+Node,
-pnpm) и [`docs/frontend-env-setup.md §3`](docs/frontend-env-setup.md).
-
-### 1. Python-пакет (midi-gen + qwen_bridge)
+Подробное окружение: [`docs/frontend-env-setup.md`](docs/frontend-env-setup.md).
 
 ```bash
+# Python-часть (генерация + тесты)
 git clone https://github.com/ColdSimens78/l2t-copilot.git && cd l2t-copilot
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/pytest tests/                       # 20 контрактов генерации
-.venv/bin/l2t-midi-gen --cli 90 "E minor" /tmp/b.mid   # CLI без MCP
-```
+.venv/bin/pytest tests/
 
-### 2. Rust: ядро и кокпит
-
-```bash
+# Rust-часть (ядро + кокпит)
 . ~/.cargo/env
-cargo test -p l2t-core                        # ядро: bus/facade/preview
-cd ui && pnpm install && pnpm dev --port 5199 # фронт (hot-reload)
-cd ui/src-tauri && cargo build && ./target/debug/l2t-cockpit  # окно
+cargo test -p l2t-core
+cd ui && pnpm install && pnpm build && cd src-tauri && pnpm tauri build
 ```
 
-### 3. Rust-анализатор (audio-analyzer) — готовый бинарь
+Готовый `.deb` лежит в [releases](https://github.com/ColdSimens78/l2t-copilot/releases).
+После установки — ярлык «L2T Cockpit» в меню приложений.
 
-```bash
-# release: https://github.com/JuzzyDee/audio-analyzer-rs/releases
-mkdir -p ~/bin && tar xzf audio-analyzer-*.tar.gz -C ~/bin && chmod +x ~/bin/mcp-server
-```
+Сервисы, которые кокпит дёргает сам: `audio-analyzer` и `soundcraft-cli`
+в `~/bin` (бинарники с GitHub releases), `l2t-midi-gen` из `.venv` репо.
 
-### 4. SoundCraft standalone — движок
+## Решения, которые здесь проверены
 
-```bash
-# release v0.20.1+: https://github.com/storytold/soundcraft/releases
-dpkg-deb -x soundcraft-0.20.1-linux-x86_64.deb ~/soundcraft && \
-  cp ~/soundcraft/usr/bin/soundcraft* ~/bin/        # паттерн audio-analyzer
-soundcraft-cli --version                             # 0.20.1
-```
+Ниже — не дизайн-фантазии: каждая строчка прошла через рабочий прогон
+и осталась в документации с причинами.
 
-### 5. MCP-конфиг клиента (для агентного режима)
+- **Сессия — источник истины.** Генераторы не пишут tempo в MIDI-файлы:
+  импорт с чужим темпом молча перезаписывает темп-карту DAW. Настройки
+  лупа применяются только явной кнопкой пользователя.
+- **Таймаут ≠ отказ.** Ядро после таймаута само проверяет состояние
+  операции и отдаёт вердикт — интерфейс не делает слепых повторов.
+- **Призрачные ноты = контракт.** Каждое предложение ИИ описано
+  структурой с rationale и source_tool; каждое принятие/отклонение
+  пишется в manifest — по нему считается реальная метрика качества.
+- **Relative-key equivalence.** A minor и C major для самопроверки —
+  одно и то же (правило зашито в `core.keys`), а тональность
+  перепроверяется после завершения аранжировки, не до.
+- **Ревью чужих зависимостей.** Каждый новый инструмент проходит
+  проверку лицензии по содержимому LICENSE-файла и security-аудит.
+  Пример: из 7 предложенных MCP-серверов в проект не попал ни один —
+  два имени не существуют, один проект был без лицензии.
 
-`~/.zcode/cli/config.json` (Claude Desktop / Cursor — аналогично `mcpServers`):
+## Разработка
 
-```json
-{
-  "mcp": {
-    "servers": {
-      "audio-analyzer": {"type": "stdio", "command": "/home/ВЫ/bin/mcp-server", "timeoutMs": 30000},
-      "midi-gen": {"type": "stdio", "command": "/home/ВЫ/l2t-copilot/.venv/bin/l2t-midi-gen", "timeoutMs": 30000},
-      "qwen-brain": {"type": "stdio", "command": "/home/ВЫ/l2t-copilot/.venv/bin/l2t-qwen-brain", "timeoutMs": 30000}
-    }
-  }
-}
-```
+Стек: Rust (ядро и движок), Python (MCP-серверы), TypeScript/React
+(интерфейс). Тесты — pytest и cargo, CI гоняет оба на каждый push.
 
-Правила конфига: **абсолютные** пути, без `${...}`-шаблонов, строгая схема
-(лишний ключ = сервер молча выбрасывается).
+Правила разработки описаны в [`CONTRIBUTING.md`](CONTRIBUTING.md) и
+[`AGENTS.md`](AGENTS.md) (в этом репозитории код пишут AI-агенты —
+[`AGENTS.md`](AGENTS.md) описывает, как именно это устроено: роли,
+границы, запреты, шаблоны тестов). Архитектурные развороты и триггеры
+пересмотра — в [`DECISION.md`](DECISION.md).
 
-## Контракт шины (7 правил — выжаты из реальных инцидентов)
-
-1. **Workspace — граница песочницы**: `import_*` читают только из workspace,
-   баунсы пишутся туда же (у SoundCraft — `--automation-*-root`).
-2. **`timeoutMs` на каждый вызов; таймаут ≠ отказ** — после таймаута ядро
-   само делает `inspect` и отдаёт вердикт, никакого молчаливого ретрая.
-3. **Паника в хендлере → JSON-RPC error** с текстом (на SDK 2.x — только
-   через `ToolError`), никогда — молчаливое зависание.
-4. **Сессия — источник истины**: генераторы не вшивают `set_tempo`
-   (`embed_tempo=False`); хост применяет настройки лупа только по явному
-   opt-in пользователя.
-5. **Lifecycle движка**: wake-паттерн (поднять → подождать → retry) для
-   GUI-хостов; headless-CLI стартует за 0.15 с.
-6. **Дублирование клипов экспоненциально** («duplicate selection»):
-   N копий = `ceil(log2 N)` вызовов.
-7. **Self-Check принимает relative-key equivalence** (A minor ≡ C major,
-   правило в `core.keys.keys_match`) и перепроверяет тональность ПОСЛЕ
-   завершения аранжировки.
+Лицензии зависимостей — 39 Python-пакетов и 118 Rust-крейтов, ноль
+копилефта — собраны в [`DEPENDENCIES.md`](DEPENDENCIES.md).
 
 ## Документация
 
-- [docs/prd-l2t-v0.2.md](docs/prd-l2t-v0.2.md) — PRD: видение, аудитория (волны), метрика Acceptance Rate
-- [docs/ipc-contract.md](docs/ipc-contract.md) — контракт фронт↔ядро v0.2 (единый источник типов)
-- [docs/ui-screens-v0.md](docs/ui-screens-v0.md) — поэкранная интеракция-спека
-- [docs/ui-architecture-proposal.md](docs/ui-architecture-proposal.md) — «Кокпит над шиной» v0.4
-- [docs/oss-recon-engines.md](docs/oss-recon-engines.md) — выбор движка ( SoundCraft standalone vs рынок)
-- [docs/oss-recon-ui.md](docs/oss-recon-ui.md) / [docs/oss-recon-soundfonts.md](docs/oss-recon-soundfonts.md) / [docs/oss-recon-telegram.md](docs/oss-recon-telegram.md) — OSS-разведки
-- [DECISION.md](DECISION.md) — форк-триггеры и история решений · [DEPENDENCIES.md](DEPENDENCIES.md) — лицензионный манифест
+- [`docs/prd-l2t-v0.2.md`](docs/prd-l2t-v0.2.md) — продуктовые требования
+- [`docs/ui-screens-v0.md`](docs/ui-screens-v0.md) — интеракция экранов
+- [`docs/ipc-contract.md`](docs/ipc-contract.md) — контракт ядро↔интерфейс
+- [`docs/ai-development.md`](docs/ai-development.md) — как этот репозиторий
+  разрабатывается: роли, конвейер, цифры
+- [`docs/oss-recon-*.md`](docs/) — исследования движков, библиотек,
+  soundfont'ов, MCP-безопасности
 
-## Roadmap
+## Об авторе
 
-- ✅ **Этап 1** — ядро (l2t-core: bus/facade/preview, 9 cargo-тестов), WebKitGTK-спайк **GO**, UI-скаффолд + ghost notes (моки), CI
-- ✅ **Этап 2** — production connect: engine slot, adopt_loop, настоящий get_bus_state, staging manifest, accept через движок, e2e из webview
-- 🔨 **Этап 3** — экраны S0–S7 на реальном IPC, SoundCraft-клиент (adopt_loop/get_bus_state), панель Acceptance Rate, экспорт трека из кокпита
-- ⏳ **Этап 4** — «Мозг»: автопилот через qwen_bridge, стоп-кран, лимиты
+Проект сделан мной, Ilmir, за три дня — от идеи до работающего
+десктоп-приложения с релизом. Вся кодовая база написана AI-агентами
+под моим руководством: продуктовые решения, спецификации, архитектура,
+ревью каждого коммита и ответственность за результат — на мне; агенты —
+исполнительный инструмент, которым я управляю через контракты и
+протоколы, описанные выше. Как именно устроен этот процесс — в
+[`docs/ai-development.md`](docs/ai-development.md).
 
 ## Лицензия
 
-MIT — см. [LICENSE](LICENSE). Обязательства по зависимостям: [DEPENDENCIES.md](DEPENDENCIES.md).
+MIT — см. [LICENSE](LICENSE).
