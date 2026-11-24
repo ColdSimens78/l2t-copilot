@@ -44,3 +44,4 @@ Thumbs.db
 !examples/**/*.midi
 # ...кроме CC0-тестовых лупов в examples (FLAC: git-friendly lossless)
 !examples/**/*.flac
+.serena/
