@@ -218,14 +218,15 @@ async fn drums_suggestion_keeps_gm_channel() {
 
 // -------------------------------------------------- живой audio-analyzer ----
 
-/// Минимальный RIFF/WAVE PCM16 mono 44100 — синус 0.5 с.
-fn write_sine_wav(path: &Path) {
+/// Минимальный RIFF/WAVE PCM16 mono 44100 — синус 0.5 с заданной
+/// амплитудой (12000 ≈ −9.5 LUFS, вдвое тише ≈ −15.5 LUFS).
+fn write_sine_wav_amp(path: &Path, amplitude: f32) {
     let sr = 44100u32;
     let n = sr / 2;
     let mut data = Vec::with_capacity((n * 2) as usize);
     for i in 0..n {
         let t = i as f32 / sr as f32;
-        let s = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 12000.0;
+        let s = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * amplitude;
         data.extend_from_slice(&(s as i16).to_le_bytes());
     }
     let mut f = std::fs::File::create(path).unwrap();
@@ -242,6 +243,10 @@ fn write_sine_wav(path: &Path) {
     f.write_all(b"data").unwrap();
     f.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
     f.write_all(&data).unwrap();
+}
+
+fn write_sine_wav(path: &Path) {
+    write_sine_wav_amp(path, 12000.0);
 }
 
 fn tempfile_staging(tag: &str) -> PathBuf {
@@ -327,9 +332,9 @@ async fn mix_facades_echo_engine_forms_on_mock() {
         args: vec![],
         env: HashMap::new(),
     };
-    let mut core = CockpitCore::connect_in(broken_an, broken_midi, tempfile_staging("mixmock")).await;
+    let staging = tempfile_staging("mixmock");
+    let mut core = CockpitCore::connect_in(broken_an, broken_midi, staging.clone()).await;
     core.attach_engine(cfg).await.expect("мок-движок");
-
     // громкость: абсолют и дельта; echo возвращает точную форму вызова
     let res = core
         .mix_volume(Some(&[1, 2]), Some(-3.5), None)
@@ -361,6 +366,13 @@ async fn mix_facades_echo_engine_forms_on_mock() {
     assert_eq!(res["value"], json!(true));
     let res = core.mix_solo(None, false).await.expect("mix_solo");
     assert_eq!(res["echo"]["params"], json!({"on": false}));
+
+    // v0.3: target "loop" без эталона X-Ray — bounded-ошибка до вызова движка
+    let err = core
+        .export_track(Some(&staging.join("loop-out.wav")), MasterTarget::Loop)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("нет эталона"), "got: {err}");
 
     // движение зафиксировано в журнале шины (для события bus_log)
     let log = core.take_bus_log();
@@ -693,6 +705,60 @@ async fn export_track_hits_mastering_target_on_demo_session() {
         "текст: {err}"
     );
     assert!(!outside.exists());
+
+    // v0.3 reference-matching: цель «loop» — громкость исходного лупа.
+    // Тихий синус (−15.5 LUFS) достижим: +3.87 при запасе 4.25 — точный
+    // гейн сходится с эталоном (критерий |bounce − loop| < 1.5)
+    let quiet_loop = ws.join("quiet-loop.wav");
+    write_sine_wav_amp(&quiet_loop, 6000.0);
+    let loop_ref = core.analyze_loop(&quiet_loop).await.expect("X-Ray тихого лупа");
+    let loop_out = export_dir.join("loop-match.wav");
+    let res_loop = core
+        .export_track(Some(&loop_out), MasterTarget::Loop)
+        .await
+        .expect("export с target loop");
+    assert!(loop_out.is_file());
+    let m = res_loop.mastering.as_ref().expect("блок mastering при цели");
+    assert_eq!(
+        (m.applied, m.measured_by, m.target_lufs),
+        (
+            MasteringApplied::Gain,
+            LoudnessSource::Analyzer,
+            loop_ref.lufs
+        )
+    );
+    assert_eq!(m.verdict, MasteringVerdict::OnTarget, "точный мэтч: {m:?}");
+    assert!(
+        (m.achieved_lufs - loop_ref.lufs).abs() < 1.5,
+        "критерий reference-matching: achieved {} vs loop {}",
+        m.achieved_lufs,
+        loop_ref.lufs
+    );
+
+    // clamp: громкий эталон (−9.5) требует +9.87 при запасе 4.25 — только
+    // normalize-потолок и честный below_target
+    let loud_loop = ws.join("loud-loop.wav");
+    write_sine_wav(&loud_loop);
+    core.analyze_loop(&loud_loop).await.expect("X-Ray громкого лупа");
+    let clamped = export_dir.join("loop-clamped.wav");
+    let res_clamped = core
+        .export_track(Some(&clamped), MasterTarget::Loop)
+        .await
+        .expect("export с target loop (clamp)");
+    let m = res_clamped.mastering.as_ref().expect("блок mastering при цели");
+    assert_eq!(
+        (m.applied, m.verdict),
+        (
+            MasteringApplied::Normalized,
+            MasteringVerdict::BelowTarget
+        ),
+        "запаса до громкости лупа не хватает: {m:?}"
+    );
+    assert!(
+        (m.achieved_lufs + 15.12).abs() < 0.3,
+        "normalize-потолок: {}",
+        m.achieved_lufs
+    );
 
     // пустая сессия: громкости нет — честный silent, без второй отрисовки
     let empty_engine = ServerConfig {

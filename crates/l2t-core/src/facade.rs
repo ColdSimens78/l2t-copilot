@@ -823,7 +823,9 @@ impl CockpitCore {
     /// Default: `<export-dir>/l2t-export-<время>.wav`, где export-dir =
     /// env L2T_EXPORT_DIR или `<workspace>/export` (внутри automation-roots —
     /// правило №1). С целью громкости (Mastering Targets, контракт v0.2.2)
-    /// к отчёту движка добавляется блок `mastering`; при достаточном запасе
+    /// к отчёту движка добавляется блок `mastering`: платформенная цель
+    /// (spotify/apple) либо громкость исходного лупа (v0.3 reference-
+    /// matching, эталон X-Ray от analyze_loop); при достаточном запасе
     /// по пику цель достигается точным гейном — см. `export_mastered`.
     /// Сессию движка экспорт не меняет.
     pub async fn export_track(
@@ -850,8 +852,20 @@ impl CockpitCore {
             tool: "export_track".into(),
             message: "движок SoundCraft не подключён".into(),
         })?;
+        // Цель громкости: платформенные константы либо эталон лупа
+        // (v0.3 reference-matching — эталон X-Ray уже ставит analyze_loop).
+        let target_lufs = match target {
+            MasterTarget::Bypass => None,
+            MasterTarget::Loop => Some(self.last_loop_xray.as_ref().map(|x| x.lufs).ok_or_else(
+                || CoreError::Tool {
+                    tool: "export_track".into(),
+                    message: "нет эталона лупа — сначала analyze_loop(loop.wav)".into(),
+                },
+            )?),
+            t => t.target_lufs(),
+        };
         let engine_config = self.engine_config.clone();
-        let (report, mastered) = match target.target_lufs() {
+        let (report, mastered) = match target_lufs {
             None => (
                 bounce_to(&mut self.bus_log, engine, &path, false, self.call_timeout).await?,
                 None,
@@ -870,7 +884,7 @@ impl CockpitCore {
             }
         };
         // повторная проверка анализатором: вердикт — по независимому замеру
-        let mastering = match (target.target_lufs(), mastered) {
+        let mastering = match (target_lufs, mastered) {
             (Some(target_lufs), Some((applied, silent))) => {
                 let (achieved_lufs, measured_by) = match self.measure_lufs(&path).await {
                     Some(lufs) => (lufs, LoudnessSource::Analyzer),

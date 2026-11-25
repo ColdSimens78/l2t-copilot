@@ -148,7 +148,8 @@ pub struct SelfCheckReport {
 
 // ------------------------------------------------- Mastering Targets v0 ----
 
-/// Цель громкости экспорта (v0.2.1): нормализация стриминговых платформ.
+/// Цель громкости экспорта (v0.2.1): платформы либо исходный луп
+/// (v0.3 reference-matching).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MasterTarget {
     /// Без цели: bounce уходит как есть.
@@ -158,6 +159,10 @@ pub enum MasterTarget {
     Spotify,
     #[serde(rename = "apple")]
     Apple,
+    /// Громкость исходного лупа (v0.3): «продолжение лупа на его уровне».
+    /// Цель резолвится при экспорте из эталона X-Ray (analyze_loop лупа).
+    #[serde(rename = "loop")]
+    Loop,
 }
 
 /// Нормализация громкости Spotify, LUFS.
@@ -176,13 +181,15 @@ impl MasterTarget {
             Self::Bypass => "none",
             Self::Spotify => "spotify",
             Self::Apple => "apple",
+            Self::Loop => "loop",
         }
     }
 
-    /// Целевая громкость, LUFS; `None` — цель не задана.
+    /// Платформенная цель, LUFS; `None` — константы нет (`none`, `loop`:
+    /// для loop громкость резолвится в `export_track` из эталона X-Ray).
     pub fn target_lufs(self) -> Option<f64> {
         match self {
-            Self::Bypass => None,
+            Self::Bypass | Self::Loop => None,
             Self::Spotify => Some(SPOTIFY_LUFS),
             Self::Apple => Some(APPLE_LUFS),
         }
@@ -480,14 +487,16 @@ mod tests {
         assert_eq!(v, serde_json::json!({"tempo": 94.0, "marker": "Key: D minor"}));
     }
 
-    /// v0.2.1: цели на проводе — те же строки, что в TS-зеркале, у каждой
-    /// ровно одна LUFS-константа.
+    /// v0.2.1+: цели на проводе — те же строки, что в TS-зеркале, у
+    /// платформ ровно одна LUFS-константа; у loop константы нет — громкость
+    /// лупа резолвится при экспорте из эталона X-Ray.
     #[test]
     fn master_targets_roundtrip_with_lufs() {
         for (wire, lufs) in [
             ("none", None),
             ("spotify", Some(-14.0)),
             ("apple", Some(-16.0)),
+            ("loop", None),
         ] {
             let t: MasterTarget = serde_json::from_value(serde_json::json!(wire)).unwrap();
             assert_eq!(serde_json::to_value(t).unwrap(), serde_json::json!(wire));
