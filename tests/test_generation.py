@@ -63,3 +63,46 @@ def test_drum_variation_fill_count(tmp_path):
     info = lg.write_drums(path, 60, 8, "basic", variation=True)
     # 8 тактов: 96 базовых ударов, филлы на тактах 4 и 8 дают +1 каждый
     assert info["hits"] == 98
+
+
+# --- generate_melody (lead-партия) -------------------------------------------
+
+_FULL_MINOR = (0, 2, 3, 5, 7, 8, 10)
+_FULL_MAJOR = (0, 2, 4, 5, 7, 9, 11)
+
+
+def test_melody_deterministic_byte_for_byte(tmp_path):
+    pc, mode = parse_key("E minor")
+    ev1 = lg.melody_events("flow", pc, mode, 4)
+    ev2 = lg.melody_events("flow", pc, mode, 4)
+    assert ev1 == ev2                       # события совпадают раз-в-раз
+    p1, p2 = str(tmp_path / "a.mid"), str(tmp_path / "b.mid")
+    lg.write_melody(p1, 120, ev1)
+    lg.write_melody(p2, 120, ev1)
+    assert open(p1, "rb").read() == open(p2, "rb").read()  # файл байт-в-байт
+
+
+def test_melody_styles_in_register_and_in_mode():
+    pc, mode = parse_key("A minor")
+    scale = {(pc + off) % 12 for off in _FULL_MINOR}  # питч-классы лада
+    for style in lg.MELODY_STYLES:
+        evs = lg.melody_events(style, pc, mode, 4)
+        assert evs, style
+        assert all(60 <= n <= 76 for _, n, _, _ in evs), style
+        assert all(n % 12 in scale for _, n, _, _ in evs), style
+
+
+def test_melody_major_across_roots_stays_in_register():
+    for key in ("C major", "F# major", "Bb major"):
+        pc, mode = parse_key(key)
+        evs = lg.melody_events("flow", pc, mode, 2)
+        assert all(60 <= n <= 76 for _, n, _, _ in evs), key
+        scale = {(pc + off) % 12 for off in _FULL_MAJOR}  # питч-классы лада
+        assert all(n % 12 in scale for _, n, _, _ in evs), key
+
+
+def test_melody_resolves_to_root():
+    pc, _ = parse_key("A minor")
+    for style in lg.MELODY_STYLES:
+        evs = lg.melody_events(style, pc, "minor", 4)
+        assert evs[-1][1] == 60 + pc  # последняя нота мелодии — тоника

@@ -224,6 +224,104 @@ def write_drums(path: str, bpm: int, bars: int, style: str,
     return {"path": path, "bytes": os.path.getsize(path), "hits": hits}
 
 
+# --- Мелодия (lead-партия над аккордами) -----------------------------------
+
+MELODY_STYLES = ("sparse", "flow", "syncopated")
+MELODY_LOW, MELODY_HIGH = 60, 76      # регистр мелодии над аккордами (C4..E5)
+
+# Материал — пентатоника лада; проходящие — остальные ступени полного лада.
+MINOR_PENTA, MAJOR_PENTA = (0, 3, 5, 7, 10), (0, 2, 4, 7, 9)
+MINOR_FULL, MAJOR_FULL = (0, 2, 3, 5, 7, 8, 10), (0, 2, 4, 5, 7, 9, 11)
+
+# Контуры по ступеням пентатоники: sparse — ротация трёх фигур по четвертям,
+# flow — восьмые с проходящими на слабых восьмых (3-й и 7-й), syncopated —
+# три сетки в восьмых внутри такта, ротация по тактам.
+_SPARSE_DEGS = ((0, 2, 4, 2), (4, 3, 2, 0), (2, 4, 6, 4))
+_FLOW_DEGS = (0, 1, 2, 4, 3, 2, 4, 6)
+_SYNC_GRIDS = ((0, 1, 3, 4, 6, 7), (0, 2, 3, 5, 6), (1, 2, 4, 5, 7))
+_SYNC_DEGS = ((0, 2, 4, 5, 4, 2), (4, 5, 6, 4, 2), (0, 4, 5, 4, 2))
+
+
+def _deg_note(root_pitch: int, degree: int, intervals) -> int:
+    """Питч ступени пентатоники с клампом в регистр 60..76."""
+    note = root_pitch + 12 * (degree // len(intervals)) + intervals[degree % len(intervals)]
+    while note > MELODY_HIGH:
+        note -= 12
+    while note < MELODY_LOW:
+        note += 12
+    return note
+
+
+def _passing_between(root_pc: int, intervals, lo: int, hi: int, fallback: int) -> int:
+    """Проходящая нота полного лада строго между lo и hi (ближе к середине);
+    между соседями нет ступени лада — возвращаем fallback (повтор предыдущей)."""
+    lo_c, hi_c = (lo, hi) if lo < hi else (hi, lo)
+    full = set(intervals)
+    cands = [p for p in range(lo_c + 1, hi_c) if (p - root_pc) % 12 in full]
+    if not cands:
+        return fallback
+    return min(cands, key=lambda p: (abs(p - (lo_c + hi_c) / 2), p))
+
+
+def melody_events(style: str, root_pc: int, mode: str,
+                  bars: int = 4) -> list[tuple[int, int, int, int]]:
+    """Мелодия на bars тактов: (тик, нота, гейт, velocity), регистр 60..76.
+
+    Детерминировано, без рандома: материал — пентатоника лада (для минора
+    Am-пентатоника A C D E G), проходящие — ступени полного лада на слабых
+    восьмых стиля flow; каждая мелодия завершается на тонике. Ритм-стили:
+    'sparse' — четверти, 'flow' — восьмые, 'syncopated' — три синкопированные
+    сетки с ротацией по тактам.
+    """
+    if style not in MELODY_STYLES:
+        raise ValueError(f"Неизвестный стиль {style!r}; доступны: {', '.join(MELODY_STYLES)}")
+    if not 1 <= bars <= 64:
+        raise ValueError(f"bars должен быть 1..64, получил {bars}")
+    penta = MINOR_PENTA if mode == "minor" else MAJOR_PENTA
+    full = MINOR_FULL if mode == "minor" else MAJOR_FULL
+    root_pitch = MELODY_LOW + root_pc            # тоника в регистре 60..71
+    q, e = TPB, TPB // 2
+    events: list[tuple[int, int, int, int]] = []
+    for bar in range(bars):
+        final = bar == bars - 1
+        bar_events: list[tuple[int, int, int, int]] = []
+        if style == "sparse":
+            degs = _SPARSE_DEGS[bar % len(_SPARSE_DEGS)]
+            if final:
+                degs = degs[:3] + (0,)           # разрешение в тонику
+            for i, deg in enumerate(degs):
+                bar_events.append((i * q, _deg_note(root_pitch, deg, penta), q - 10,
+                                   100 if i == 0 else 90))
+        elif style == "flow":
+            for i, deg in enumerate(_FLOW_DEGS):
+                note = _deg_note(root_pitch, deg, penta)
+                if i in (3, 7):                  # слабые восьмые — проходящая
+                    nxt = _deg_note(root_pitch, _FLOW_DEGS[(i + 1) % len(_FLOW_DEGS)], penta)
+                    prev = bar_events[-1][1] if bar_events else note
+                    note = _passing_between(root_pc, full, prev, nxt, fallback=note)
+                bar_events.append((i * e, note, e - 10, 100 if i == 0 else 90))
+            if final:                            # разрешение в тонику
+                t, _, g, v = bar_events[-1]
+                bar_events[-1] = (t, root_pitch, g, v)
+        else:  # syncopated
+            grid = _SYNC_GRIDS[bar % len(_SYNC_GRIDS)]
+            degs = _SYNC_DEGS[bar % len(_SYNC_DEGS)]
+            if final:
+                degs = degs[:-1] + (0,)          # разрешение в тонику
+            for i, (pos, deg) in enumerate(zip(grid, degs)):
+                nxt_pos = grid[i + 1] if i + 1 < len(grid) else 8
+                bar_events.append((pos * e, _deg_note(root_pitch, deg, penta),
+                                   nxt_pos * e - 10,
+                                   100 if pos == 0 else 95 if pos % 2 else 90))
+        events.extend((bar * BAR_TICKS + t, n, g, v) for t, n, g, v in bar_events)
+    return events
+
+
+def write_melody(path: str, bpm: int, events, embed_tempo: bool = False) -> dict:
+    """Тот же writer, что у баса: абсолютные события + контракт темпа."""
+    return write_bassline(path, bpm, events, embed_tempo=embed_tempo)
+
+
 # --- Общая валидация --------------------------------------------------------
 
 def validate_output(bpm: int, output_path: str) -> None:

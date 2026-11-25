@@ -183,6 +183,52 @@ def generate_drum_pattern(bpm: int, output_path: str, style: str = "basic",
     }
 
 
+@mcp.tool()
+@_bounded
+def generate_melody(bpm: int, key: str, output_path: str, bars: int = 4,
+                    style: str = "flow", embed_tempo: bool = False) -> dict:
+    """Generate a lead-melody MIDI file in the given key, melody register (C4..E5).
+
+    Deterministic, no randomness: notes come from the mode's pentatonic
+    scale (A minor -> A C D E G) with diatonic passing tones on weak
+    eighths; every melody resolves to the root at the end. Rhythm styles:
+    'sparse' quarter notes, 'flow' eighth-note movement (default),
+    'syncopated' offbeat grids rotating across bars.
+
+    Args:
+        bpm: Tempo in beats per minute, 20..300 (metadata/duration only unless
+            `embed_tempo`).
+        key: Tonic + mode, e.g. 'A minor', 'Am', 'C# major', 'Bbm'.
+        output_path: Absolute .mid/.midi path; parent directories are created.
+        bars: Number of bars, 1..64 (default 4 = one progression cycle).
+        style: One of sparse|flow|syncopated.
+        embed_tempo: Write a set_tempo event. """ + TEMPO_NOTE + """
+
+    Returns:
+        Compact JSON: path, bytes, bpm, key, style, bars, note names,
+        duration_sec. """ + SANDBOX_NOTE
+    if not 1 <= bars <= 64:
+        raise ValueError(f"bars должен быть 1..64, получил {bars}")
+    if style not in lg.MELODY_STYLES:
+        raise ValueError(
+            f"style должен быть одним из {', '.join(lg.MELODY_STYLES)}, получил {style!r}")
+    lg.validate_output(bpm, output_path)
+    root_pc, mode = lg.parse_key(key)
+    events = lg.melody_events(style, root_pc, mode, bars)
+    info = lg.write_melody(output_path, bpm, events, embed_tempo=embed_tempo)
+    return {
+        **info,
+        "bpm": bpm,
+        "embed_tempo": embed_tempo,
+        "key": f"{lg.PC_NAMES[root_pc]} {mode}",
+        "style": style,
+        "bars": bars,
+        "notes": [lg.note_name(n) for _, n, _, _ in events],
+        "ticks_per_beat": lg.TPB,
+        "duration_sec": round(max(t + g for t, _, g, _ in events) / lg.TPB * 60.0 / bpm, 3),
+    }
+
+
 def _cli(a: list[str]) -> dict:
     """CLI-диспетчер (те же формы, что прошли все регресс-тесты v3)."""
     if a and a[0] == "chords":
@@ -198,6 +244,12 @@ def _cli(a: list[str]) -> dict:
             bars=int(a[4]) if len(a) > 4 else 1,
             embed_tempo=len(a) > 5 and a[5] == "1",
             variation=len(a) > 6 and a[6] == "1")
+    if a and a[0] == "melody":
+        # melody <bpm> <key> <out> [bars] [embed 0|1] [style]
+        return generate_melody(
+            int(a[1]), a[2], a[3], bars=int(a[4]) if len(a) > 4 else 4,
+            embed_tempo=len(a) > 5 and a[5] == "1",
+            style=a[6] if len(a) > 6 else "flow")
     # legacy: <bpm> <key> <out> [embed 0|1] [style]
     return generate_bassline(
         int(a[0]), a[1], a[2], embed_tempo=len(a) > 3 and a[3] == "1",
