@@ -36,6 +36,9 @@ pub struct CockpitCore {
     /// Слот «Движок» (SoundCraft standalone, ратифицирован владельцем).
     /// Опционален: без бинаря кокпит живёт — engine: down.
     engine: Option<BusServer>,
+    /// Конфиг слота движка — для служебных процессов (точный гейн экспорта
+    /// v0.2.2 поднимает второй движок с теми же roots).
+    engine_config: Option<ServerConfig>,
     call_timeout: Duration,
     staging_dir: PathBuf,
     /// Текущее (последнее) предложение по каждой партии.
@@ -89,6 +92,7 @@ impl CockpitCore {
             audio_analyzer,
             midi_gen,
             engine: None,
+            engine_config: None,
             call_timeout: DEFAULT_CALL_TIMEOUT,
             staging_dir,
             suggestions: HashMap::new(),
@@ -101,8 +105,9 @@ impl CockpitCore {
     /// Подключить слот «Движок» (SoundCraft standalone). Битый движок не
     /// убивает ядро — get_bus_state останется Down.
     pub async fn attach_engine(&mut self, config: ServerConfig) -> CoreResult<()> {
-        let server = BusServer::connect(config).await?;
+        let server = BusServer::connect(config.clone()).await?;
         self.engine = Some(server);
+        self.engine_config = Some(config);
         Ok(())
     }
 
@@ -697,8 +702,9 @@ impl CockpitCore {
     /// напрямую из приложения): bounce сессии движком в путь экспорта.
     /// Default: `<export-dir>/l2t-export-<время>.wav`, где export-dir =
     /// env L2T_EXPORT_DIR или `<workspace>/export` (внутри automation-roots —
-    /// правило №1). С целью громкости (Mastering Targets v0, контракт v0.2.1)
-    /// к отчёту движка добавляется блок `mastering` — см. `export_mastered`.
+    /// правило №1). С целью громкости (Mastering Targets, контракт v0.2.2)
+    /// к отчёту движка добавляется блок `mastering`; при достаточном запасе
+    /// по пику цель достигается точным гейном — см. `export_mastered`.
     /// Сессию движка экспорт не меняет.
     pub async fn export_track(
         &mut self,
@@ -724,6 +730,7 @@ impl CockpitCore {
             tool: "export_track".into(),
             message: "движок SoundCraft не подключён".into(),
         })?;
+        let engine_config = self.engine_config.clone();
         let (report, mastered) = match target.target_lufs() {
             None => (
                 bounce_to(&mut self.bus_log, engine, &path, false, self.call_timeout).await?,
@@ -733,6 +740,7 @@ impl CockpitCore {
                 let (report, applied, silent) = export_mastered(
                     &mut self.bus_log,
                     engine,
+                    engine_config.as_ref(),
                     &path,
                     target_lufs,
                     self.call_timeout,
@@ -940,14 +948,14 @@ fn bounce_report(v: &Value) -> CoreResult<BounceReport> {
     })
 }
 
-/// Экспорт с целью громкости (Mastering Targets v0). Движок не нормализует
-/// до LUFS — только по пику (−0.1 dBFS), — поэтому контур такой: сырой
-/// bounce в соседний временный файл → решение (`plan_mastering`) → либо
-/// файл остаётся как есть, либо движок рендерит ту же сессию с normalize.
+/// Экспорт с целью громкости (Mastering Targets, v0.2.2). Контур: сырой
+/// bounce в соседний временный файл → решение (`plan_mastering`) → файл
+/// как есть, normalize-потолок по пику либо точный гейн scratch-сессией.
 /// Возвращает отчёт о финальном файле, применённый шаг и признак тишины.
 async fn export_mastered(
     log: &mut VecDeque<BusLog>,
     engine: &BusServer,
+    engine_config: Option<&ServerConfig>,
     path: &Path,
     target_lufs: f64,
     timeout: Duration,
@@ -961,16 +969,42 @@ async fn export_mastered(
         let first = bounce_to(log, engine, &raw, false, timeout).await?;
         let silent = first.lufs <= SILENCE_LUFS;
         match plan_mastering(first.lufs, first.peak_db, target_lufs) {
-            MasteringApplied::Untouched => {
+            MasteringPlan::Untouched => {
                 std::fs::rename(&raw, path).map_err(|e| CoreError::Tool {
                     tool: "export_track".into(),
                     message: format!("не перенёс {} в {}: {e}", raw.display(), path.display()),
                 })?;
                 Ok((first, MasteringApplied::Untouched, silent))
             }
-            MasteringApplied::Normalized => {
+            MasteringPlan::Normalize => {
                 let report = bounce_to(log, engine, path, true, timeout).await?;
                 Ok((report, MasteringApplied::Normalized, silent))
+            }
+            MasteringPlan::Gain(gain_db) => {
+                let gained = match engine_config {
+                    Some(cfg) => scratch_gain(log, engine, cfg, &raw, path, gain_db, timeout).await,
+                    None => Err(CoreError::Tool {
+                        tool: "export_track".into(),
+                        message: "нет конфига движка для служебной scratch-сессии".into(),
+                    }),
+                };
+                match gained {
+                    Ok(report) => Ok((report, MasteringApplied::Gain, silent)),
+                    // точный гейн — лучшая попытка: без него честно отдаём
+                    // сырой bounce (контрактный ответ остаётся истинным)
+                    Err(e) => {
+                        eprintln!("[export] точный гейн не удался ({e}); экспорт без обработки");
+                        std::fs::rename(&raw, path).map_err(|err| CoreError::Tool {
+                            tool: "export_track".into(),
+                            message: format!(
+                                "не перенёс {} в {}: {err}",
+                                raw.display(),
+                                path.display()
+                            ),
+                        })?;
+                        Ok((first, MasteringApplied::Untouched, silent))
+                    }
+                }
             }
         }
     }
@@ -980,27 +1014,108 @@ async fn export_mastered(
     outcome
 }
 
-/// Решение по цели для bounce с измерениями `lufs`/`peak`. Normalize
-/// поднимает пик до `PEAK_CEILING_DBFS`, громкость сдвигается на тот же
-/// гейн (интегральный LUFS линейно следует чистому гейну — сверен на
-/// демо-сессии движка), поэтому решение известно до второго рендера.
-fn plan_mastering(lufs: f64, peak: f64, target_lufs: f64) -> MasteringApplied {
+/// Точный гейн до цели (v0.2.2, рецепт из разведки): второй процесс
+/// движка с теми же roots поднимает служебную scratch-сессию, импортирует
+/// сырой bounce, применяет `mix.volume delta_db` на импортированном треке
+/// и рендерит финальный файл. Рабочую сессию пользователя не трогает;
+/// scratch-сессия живёт в памяти и не сохраняется.
+async fn scratch_gain(
+    log: &mut VecDeque<BusLog>,
+    engine: &BusServer,
+    engine_config: &ServerConfig,
+    src: &Path,
+    dst: &Path,
+    gain_db: f64,
+    timeout: Duration,
+) -> CoreResult<BounceReport> {
+    // частота сессии — из рабочей сессии, чтобы импорт лёг без ресемплинга
+    let (_, insp) = call_logged(
+        log, engine, "inspect_session", "export_track",
+        json!({"detail": "summary"}), timeout,
+    )
+    .await?;
+    let sample_rate = insp.get("sample_rate").and_then(Value::as_i64).unwrap_or(48_000);
+    let scratch = BusServer::connect(engine_config.clone()).await?;
+    let outcome = async {
+        let name = format!("l2t-gain-{}", now_ms());
+        call_logged(
+            log, &scratch, "new_session", "export_track",
+            json!({"name": name, "sample_rate": sample_rate, "template": "blank"}),
+            timeout,
+        )
+        .await?;
+        let (_, imported) = call_logged(
+            log, &scratch, "import_audio", "export_track",
+            json!({"path": src.display().to_string()}),
+            timeout,
+        )
+        .await?;
+        let track = imported
+            .get("imported")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(|e| e.get("track"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| CoreError::Tool {
+                tool: "export_track".into(),
+                message: format!("в ответе import_audio нет трека: {imported}"),
+            })?;
+        call_logged(
+            log, &scratch, "execute", "export_track",
+            json!({"command": "mix.volume",
+                   "params": {"tracks": [track], "delta_db": round2(gain_db)}}),
+            timeout,
+        )
+        .await?;
+        bounce_to(log, &scratch, dst, false, timeout).await
+    }
+    .await;
+    scratch.shutdown().await;
+    outcome
+}
+
+/// Решение по цели для bounce с измерениями `lufs`/`peak`. Громкость
+/// линейно следует чистому гейну (сверено на демо-сессии движка), запас
+/// громкости ограничен потолком пика, поэтому решение известно до рендера:
+/// хватает запаса — точный гейн до цели; не хватает — normalize-потолок.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MasteringPlan {
+    /// Файл остаётся как есть.
+    Untouched,
+    /// Peak-normalize движком (максимум громкости, ниже цели).
+    Normalize,
+    /// Точный гейн, дБ (положительный — подъём, отрицательный — ослабление).
+    Gain(f64),
+}
+
+fn plan_mastering(lufs: f64, peak: f64, target_lufs: f64) -> MasteringPlan {
+    // тише гейта EBU R128 громкости нет
+    if lufs <= SILENCE_LUFS {
+        return MasteringPlan::Untouched;
+    }
+    let needed = target_lufs - lufs;
+    // цель уже достигнута
+    if needed.abs() < 0.05 {
+        return MasteringPlan::Untouched;
+    }
     // пики выше безопасного потолка снимаются всегда, цель ни при чём
     if peak > PEAK_CEILING_DBFS {
-        return MasteringApplied::Normalized;
+        return MasteringPlan::Normalize;
     }
-    let gain = PEAK_CEILING_DBFS - peak;
-    // тише гейта EBU R128 громкости нет; пик уже на потолке — гейна нет
-    if lufs <= SILENCE_LUFS || gain < 0.05 {
-        return MasteringApplied::Untouched;
-    }
-    // нормализация приближает к цели — применяем; отдаляет — оставляем как есть
-    let distance_now = (lufs - target_lufs).abs();
-    let distance_after = (lufs + gain - target_lufs).abs();
-    if distance_after < distance_now {
-        MasteringApplied::Normalized
+    let headroom = PEAK_CEILING_DBFS - peak;
+    if needed > 0.0 {
+        if headroom < 0.05 {
+            // пик уже на потолке — громче некуда
+            MasteringPlan::Untouched
+        } else if needed > headroom {
+            // запаса до цели не хватает: максимум громкости, дальше лимитер
+            MasteringPlan::Normalize
+        } else {
+            MasteringPlan::Gain(needed)
+        }
     } else {
-        MasteringApplied::Untouched
+        // ослабление до цели — без ограничений
+        MasteringPlan::Gain(needed)
     }
 }
 
@@ -1131,51 +1246,59 @@ mod tests {
     use super::*;
     use crate::contract::{APPLE_LUFS, SPOTIFY_LUFS};
 
-    /// Демо-сессия движка v0.20.1: сырой bounce −19.37 LUFS при пике −4.35,
-    /// с normalize −15.12 при пике −0.1.
+    /// Демо-сессия движка v0.20.1: сырой bounce −19.37 LUFS при пике −4.35
+    /// (запас до потолка 4.25 дБ), с normalize −15.12 при пике −0.1.
     const DEMO_RAW: (f64, f64) = (-19.37, -4.35);
 
-    /// Нормализация приближает к цели — в том числе когда перелетает её:
-    /// для Apple −16 нормализованный −15.12 ближе (1.12), чем сырой (3.37).
+    /// Spotify −14 требует +5.37 при запасе 4.25 — только normalize-потолок;
+    /// Apple −16 требует +3.37 — запаса хватает, и план даёт точный гейн.
     #[test]
-    fn normalize_is_applied_when_it_gets_closer_to_target() {
+    fn plan_normalizes_when_headroom_is_short_and_gains_exactly_otherwise() {
         assert_eq!(
             plan_mastering(DEMO_RAW.0, DEMO_RAW.1, SPOTIFY_LUFS),
-            MasteringApplied::Normalized
+            MasteringPlan::Normalize
         );
-        assert_eq!(
-            plan_mastering(DEMO_RAW.0, DEMO_RAW.1, APPLE_LUFS),
-            MasteringApplied::Normalized
-        );
+        match plan_mastering(DEMO_RAW.0, DEMO_RAW.1, APPLE_LUFS) {
+            MasteringPlan::Gain(gain) => assert!(
+                (gain - 3.37).abs() < 0.01,
+                "точный гейн до Apple: {gain}"
+            ),
+            other => panic!("ожидался точный гейн, получили {other:?}"),
+        }
     }
 
-    /// Уже громкий материал нормализация уводит от цели дальше, чем сырой
-    /// bounce, — тогда файл остаётся как есть.
+    /// Громкий материал ослабляется до цели точно: гейну вниз ограничений нет.
     #[test]
-    fn normalize_is_skipped_when_raw_bounce_is_closer() {
-        // −14.5 LUFS при пике −1: нормализация даст −13.6 — громче цели
-        // Apple на 2.4, сырой тише на 1.5
+    fn plan_attenuates_loud_material_to_exact_target() {
+        // −14.5 LUFS при пике −1: до Apple −16 не хватает −1.5
         assert_eq!(
             plan_mastering(-14.5, -1.0, APPLE_LUFS),
-            MasteringApplied::Untouched
+            MasteringPlan::Gain(-1.5)
         );
     }
 
-    /// Пики выше безопасного потолка снимаются всегда; тишина и файл на
-    /// потолке остаются как есть.
+    /// Тишина, достигнутая цель и пик на потолке (громче некуда) — файл
+    /// остаётся как есть; пики выше потолка нормализуются всегда.
     #[test]
-    fn peak_ceiling_silence_and_hot_peaks() {
-        assert_eq!(
-            plan_mastering(-20.0, 0.5, APPLE_LUFS),
-            MasteringApplied::Normalized
-        );
+    fn plan_skips_silence_on_target_and_ceiling_cases() {
         assert_eq!(
             plan_mastering(-144.0, -144.0, SPOTIFY_LUFS),
-            MasteringApplied::Untouched
+            MasteringPlan::Untouched
+        );
+        assert_eq!(
+            plan_mastering(-14.02, -2.0, SPOTIFY_LUFS),
+            MasteringPlan::Untouched,
+            "цель достигнута в допуске — рендер не нужен"
         );
         assert_eq!(
             plan_mastering(-15.1, -0.1, SPOTIFY_LUFS),
-            MasteringApplied::Untouched
+            MasteringPlan::Untouched,
+            "пик на потолке: громче некуда, pointless-рендер не нужен"
+        );
+        assert_eq!(
+            plan_mastering(-20.0, 0.5, APPLE_LUFS),
+            MasteringPlan::Normalize,
+            "пик выше −0.1 dBFS снимается независимо от цели"
         );
     }
 

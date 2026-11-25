@@ -7,10 +7,12 @@
 ## [Unreleased]
 
 ### Added
-- **Mastering Targets v0** — `export_track` с целью громкости (`spotify` −14 /
-  `apple` −16 LUFS): экспорт микса в WAV, peak-normalize движком до −0.1 dBFS,
-  повторный замер analyzer и честный отчёт о дистанции до цели
-  (`achieved_lufs`, `delta`, `verdict`); контракт IPC v0.2.1.
+- **Mastering Targets** — `export_track` с целью громкости (`spotify` −14 /
+  `apple` −16 LUFS): экспорт микса в WAV, повторный замер analyzer и честный
+  отчёт о дистанции до цели (`achieved_lufs`, `delta`, `verdict`); при
+  достаточном запасе по пику — точный гейн до цели через служебную
+  scratch-сессию движка (v0.2.2), иначе normalize-потолок −0.1 dBFS;
+  контракт IPC v0.2.2.
 
 ### Planned (этап 3)
 - Экраны S0–S7 на реальном IPC (адаптер tauri), панель Acceptance Rate (C7),

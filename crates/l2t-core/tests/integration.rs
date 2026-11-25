@@ -13,7 +13,7 @@ use l2t_core::bus::BusServer;
 use l2t_core::config::{resolve_audio_analyzer, resolve_midi_gen, resolve_soundcraft, ServerConfig};
 use l2t_core::contract::{
     LoudnessSource, MasteringApplied, MasteringVerdict, MasterTarget, Part, SuggestionStatus,
-    SPOTIFY_LUFS,
+    APPLE_LUFS, SPOTIFY_LUFS,
 };
 use l2t_core::error::CoreError;
 use l2t_core::CockpitCore;
@@ -469,6 +469,39 @@ async fn export_track_hits_mastering_target_on_demo_session() {
         "дельта: {}",
         m.delta
     );
+
+    // цель Apple: запаса по пику хватает (+3.37 при запасе 4.25) — точный
+    // гейн scratch-сессией сходится с целью, вердикт on_target
+    let apple = export_dir.join("apple.wav");
+    let res_apple = core
+        .export_track(Some(&apple), MasterTarget::Apple)
+        .await
+        .expect("export apple (точный гейн)");
+    assert!(apple.is_file());
+    let m = res_apple.mastering.as_ref().expect("блок mastering при цели");
+    assert_eq!(
+        (m.applied, m.measured_by),
+        (MasteringApplied::Gain, LoudnessSource::Analyzer)
+    );
+    assert_eq!(m.target_lufs, APPLE_LUFS);
+    assert_eq!(m.verdict, MasteringVerdict::OnTarget, "точный гейн: {m:?}");
+    assert!(
+        (m.achieved_lufs - APPLE_LUFS).abs() < 0.2,
+        "achieved {} LUFS — точный гейн промахнулся: {m:?}",
+        m.achieved_lufs
+    );
+    assert!(
+        (res_apple.lufs - APPLE_LUFS).abs() < 0.3,
+        "движок {} LUFS vs analyzer {}",
+        res_apple.lufs,
+        m.achieved_lufs
+    );
+    assert!(
+        res_apple.peak_db < -0.1,
+        "точный гейн не должен упираться в потолок: {}",
+        res_apple.peak_db
+    );
+
     // промежуточного сырого bounce не осталось
     let leftovers: Vec<String> = std::fs::read_dir(&export_dir)
         .unwrap()

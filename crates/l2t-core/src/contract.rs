@@ -192,12 +192,17 @@ impl MasterTarget {
 /// Что применено к bounce ради цели (`MasteringReport.applied`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MasteringApplied {
-    /// Ничего: цели нет, либо сырой bounce уже ближе к ней.
+    /// Ничего: цели нет, тишина, цель уже достигнута либо громче некуда.
     #[serde(rename = "none")]
     Untouched,
-    /// Peak-normalize движком до −0.1 dBFS.
+    /// Peak-normalize движком до −0.1 dBFS: максимум громкости, когда
+    /// запаса по пику до цели не хватает.
     #[serde(rename = "normalize")]
     Normalized,
+    /// Точный гейн до цели (v0.2.2): служебная scratch-сессия движка,
+    /// рабочая сессия не затрагивается.
+    #[serde(rename = "gain")]
+    Gain,
 }
 
 /// Вердикт по цели (`MasteringReport.verdict`).
@@ -224,9 +229,9 @@ pub enum LoudnessSource {
     Engine,
 }
 
-/// Отчёт о целевой громкости экспорта. Числа честные: движок не
-/// нормализует до LUFS, только по пику, поэтому `delta` — расстояние до
-/// цели, а не признак сбоя.
+/// Отчёт о целевой громкости экспорта. С v0.2.2 цель достигается точно
+/// (точный гейн), когда хватает запаса по пику; иначе — normalize-потолок
+/// и честная дистанция в `delta`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MasteringReport {
     pub target_lufs: f64,

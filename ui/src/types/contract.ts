@@ -147,8 +147,12 @@ export interface ExportTrackInput {
   target?: MasterTarget;
 }
 
-/** v0.2.1: что применено к рендеру ради цели ("normalize" — пик −0.1 dBFS). */
-export type MasteringApplied = "none" | "normalize";
+/**
+ * v0.2.2: что применено к рендеру ради цели. "normalize" — пик −0.1 dBFS
+ * (запаса по пику до цели не хватило); "gain" — точный гейн до цели
+ * (служебная scratch-сессия движка).
+ */
+export type MasteringApplied = "none" | "normalize" | "gain";
 
 /**
  * v0.2.1: on_target — в пределах ±1 LU; below_target — нужен лимитер;

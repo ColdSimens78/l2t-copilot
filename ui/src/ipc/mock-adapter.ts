@@ -426,23 +426,23 @@ export const mockAdapter: CockpitApi & {
       const name = target && target !== "none" ? target : null;
       const goal = name ? TARGETS[name] : null;
       const path = output_path ?? `${WORKSPACE}export/l2t-export-${name ? `${name}-` : ""}${Date.now()}.wav`;
-      // движок нормализует только по пику: до LUFS-цели, как правило, чуть не дотягивает
-      const lufs = goal ? round2(goal.lufs - 1.1) : round2(LOOP_LUFS + mixLufsDelta());
+      // v0.2.2: при достаточном запасе по пику точный гейн сходится с целью
+      const lufs = goal ? goal.lufs : round2(LOOP_LUFS + mixLufsDelta());
       state.exportLufs.set(path, lufs);
       return {
         path,
         seconds: 8,
         lufs,
-        peak_db: goal ? -0.1 : -3.1,
-        true_peak_db: goal ? -0.07 : -2.9,
+        peak_db: goal ? -1.2 : -3.1,
+        true_peak_db: goal ? -1.1 : -2.9,
         target: name ?? "none",
         mastering: goal
           ? {
               target_lufs: goal.lufs,
-              applied: "normalize",
+              applied: "gain",
               achieved_lufs: lufs,
-              delta: round2(goal.lufs - lufs),
-              verdict: "below_target",
+              delta: 0,
+              verdict: "on_target",
               measured_by: "analyzer",
             }
           : null,
