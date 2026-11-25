@@ -1,5 +1,5 @@
 /**
- * IPC-контракт: кокпит ↔ ядро — TS-зеркало docs/ipc-contract.md **v0.2.1**.
+ * IPC-контракт: кокпит ↔ ядро — TS-зеркало docs/ipc-contract.md **v0.2.2**.
  * Единственное место типов между React-фронтом и Rust-ядром; Rust-сторона —
  * crates/l2t-core/src/contract.rs (serde). Ручная синхронизация до v1:
  * расхождение сторон = баг. Изменения схемы — только bump версии контракта
@@ -11,6 +11,10 @@
  *
  * v0.2.1 (Mastering Targets v0): + export_track с целью громкости
  * (закрывает C3 — рендер идёт через export_track).
+ *
+ * v0.2.2 (точный гейн): mastering.applied + "gain" — цель достигается
+ * служебной scratch-сессией движка, когда хватает запаса по пику; иначе
+ * normalize-потолок и честная дистанция в delta.
  */
 
 // ─── Данные ────────────────────────────────────────────────────────────────
@@ -134,10 +138,12 @@ export interface AdoptLoopOutput {
 }
 
 /**
- * v0.2.1 (Mastering Targets v0): цель громкости экспорта. "none" — без
- * мастеринга; "spotify" −14 / "apple" −16 LUFS — нормализация платформ.
+ * v0.2.1: цель громкости экспорта. "none" — без мастеринга;
+ * "spotify" −14 / "apple" −16 LUFS — платформенные константы; "loop" —
+ * громкость исходного лупа (reference-matching): цель ядро резолвит сам
+ * из эталона Loop X-Ray при экспорте.
  */
-export type MasterTarget = "none" | "spotify" | "apple";
+export type MasterTarget = "none" | "spotify" | "apple" | "loop";
 
 /** v0.2.1: вход export_track — рендер микса движком в WAV. */
 export interface ExportTrackInput {

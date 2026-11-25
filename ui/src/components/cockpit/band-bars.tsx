@@ -44,7 +44,11 @@ export function BandDeltaBars({ deltas, label }: { deltas: BandDelta[]; label: s
             className="flex items-center gap-2"
             key={delta.id}
             title={`${delta.label}: ${
-              delta.db === null ? "полоса была тишиной или стала" : `${signed(delta.db)} дБ к лупу`
+              delta.missing === "absent"
+                ? "полосы нет в отчёте"
+                : delta.missing === "silence"
+                  ? "полоса была тишиной или стала"
+                  : `${signed(delta.db ?? 0)} дБ к лупу`
             }`}
           >
             <span className="text-muted-foreground w-8 shrink-0 text-right font-mono text-[10px]">

@@ -447,9 +447,15 @@ export const mockAdapter: CockpitApi & {
       if (state.engine !== "up") {
         throw new Error("движок SoundCraft не подключён");
       }
-      const name = target && target !== "none" ? target : null;
-      const goal = name ? TARGETS[name] : null;
-      const path = output_path ?? `${WORKSPACE}export/l2t-export-${name ? `${name}-` : ""}${Date.now()}.wav`;
+      // "loop" — reference-matching: цель ядро резолвит из эталона Loop X-Ray
+      const goal =
+        target === "spotify" || target === "apple"
+          ? TARGETS[target]
+          : target === "loop"
+            ? { lufs: LOOP_LUFS, label: "уровень лупа" }
+            : null;
+      const name = goal ? target : null;
+      const path = output_path ?? `${WORKSPACE}export/l2t-export-${name ? `${target}-` : ""}${Date.now()}.wav`;
       // v0.2.2: при достаточном запасе по пику точный гейн сходится с целью
       const lufs = goal ? goal.lufs : round2(LOOP_LUFS + mixLufsDelta());
       state.exportLufs.set(path, lufs);

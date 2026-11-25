@@ -221,6 +221,8 @@ export interface CockpitStore {
   runSelfCheck: (bouncePath: string) => Promise<void>;
   /** Рендер микса движком → Self-Check (export_track, контракт v0.2.1). */
   exportAndCheck: (target: MasterTarget) => Promise<void>;
+  /** [Save WAV]: рендер без цели и без проверки — файл уходит из приложения. */
+  exportWav: () => Promise<void>;
   refreshBusState: () => Promise<void>;
 }
 
@@ -637,6 +639,29 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
     }
   }, [api, run, runSelfCheck]);
 
+  /** [Save WAV]: трек уходит из приложения без цели громкости и без проверки. */
+  const exportWav = useCallback(async function exportWav() {
+    setExporting(true);
+    const result = await run<ExportTrackOutput>(
+      "export_track",
+      undefined,
+      () => api.exportTrack({ target: "none" }),
+      {
+        detail: "Save WAV",
+        effect: (r) => `→ ${fmt(r.seconds)} с · ${fmt(r.lufs)} LUFS`,
+        retry: () => void exportWav(),
+      },
+    );
+    setExporting(false);
+    if (result) {
+      setLastExport(result);
+      pushToast({
+        tone: "ok",
+        text: `✓ WAV сохранён — ${result.path.split("/").pop() ?? result.path} (${fmt(result.lufs)} LUFS)`,
+      });
+    }
+  }, [api, pushToast, run]);
+
   const dismissDock = useCallback(() => {
     // v0: «отменить показ» — строка уходит, операция в ядре продолжается
     inflight.current.forEach((o) => {
@@ -718,6 +743,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       acceptAllReady,
       runSelfCheck,
       exportAndCheck,
+      exportWav,
       refreshBusState,
     }),
     [
@@ -727,7 +753,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       selfCheckError, dismissSelfCheckError, selfCheckRetry, lastExport, exporting, busLog, drawerOpen,
       dockPending, dockLine, dockBackground, dismissDock, toasts, pushToast, dismissToast,
       analyzeLoop, retryAnalyze, adoptLoop, generatePart, regenerate, retryChannel,
-      acceptPart, rejectPart, acceptAllReady, runSelfCheck, exportAndCheck, refreshBusState,
+      acceptPart, rejectPart, acceptAllReady, runSelfCheck, exportAndCheck, exportWav, refreshBusState,
     ],
   );
 

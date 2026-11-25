@@ -9,7 +9,7 @@
  * кандидатам на перегенерацию. Эталон — последний разобранный луп.
  */
 import { useCallback, useRef, useState } from "react";
-import { ArrowRight, Download } from "lucide-react";
+import { ArrowRight, Download, Save } from "lucide-react";
 import type { MasterTarget } from "@/types/contract";
 import { useCockpit } from "@/store/cockpit";
 import { PARTS, PART_ORDER } from "@/lib/parts";
@@ -20,6 +20,7 @@ import {
   TARGET_TOLERANCE_LU,
   MASTERING_VERDICTS,
   bandDeltas,
+  bandsFlat,
   masteringLight,
   mixLufs,
   overallLight,
@@ -30,7 +31,7 @@ import {
 import { fmt, signed } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { BandDeltaBars } from "@/components/cockpit/band-bars";
-import { LightIcon } from "@/components/cockpit/light";
+import { LightDot, LightIcon } from "@/components/cockpit/light";
 import { PanelSkeleton } from "@/components/cockpit/panel-skeleton";
 import { Segmented } from "@/components/cockpit/segmented";
 import { cn } from "@/lib/utils";
@@ -39,8 +40,21 @@ const AUDIO_FILE = /\.(wav|flac|aiff?|aif|mp3|ogg)$/i;
 const CHECK_ROWS = ["Тональность", "Темп", "Громкость", "Полосы"];
 const TARGET_OPTIONS: { value: MasterTarget; label: string; title: string }[] = [
   { value: "none", label: "без цели", title: "Рендер как есть" },
-  { value: "spotify", label: "Spotify −14", title: "Нормализация по пику до −0.1 dBFS, замер до цели −14 LUFS" },
-  { value: "apple", label: "Apple −16", title: "Нормализация по пику до −0.1 dBFS, замер до цели −16 LUFS" },
+  {
+    value: "spotify",
+    label: "Spotify −14",
+    title: "Точный гейн до −14 LUFS; если пикового запаса не хватает — normalize-потолок −0.1 dBFS",
+  },
+  {
+    value: "apple",
+    label: "Apple −16",
+    title: "Точный гейн до −16 LUFS; если пикового запаса не хватает — normalize-потолок −0.1 dBFS",
+  },
+  {
+    value: "loop",
+    label: "как луп",
+    title: "Reference-matching: громкость исходного лупа — цель ядро возьмёт из эталона Loop X-Ray",
+  },
 ];
 
 const fileName = (path: string | null) => (path ? path.split("/").pop() ?? path : "—");
@@ -62,6 +76,7 @@ export function SelfCheckPanel() {
     xray,
     channels,
     exportAndCheck,
+    exportWav,
     requestRackFocus,
     pushToast,
   } = useCockpit();
@@ -99,6 +114,7 @@ export function SelfCheckPanel() {
     report && lastExport?.path === selfCheckPath ? lastExport.lufs : null;
   const rows = report ? selfCheckRows(report, xray, measured) : [];
   const light = report ? overallLight(rows) : null;
+  const deltas = report ? bandDeltas(xray, report) : [];
   const mix = report ? mixLufs(report, xray, measured) : null;
   // блок цели — только когда проверен файл последнего экспорта
   const mastering =
@@ -142,21 +158,34 @@ export function SelfCheckPanel() {
               aria-label="Итог проверки"
               className={cn("rounded-xl border p-2", LIGHTS[light].border)}
             >
-              <header className="flex items-center justify-between gap-2">
-                <h3 className="text-card-foreground text-sm font-semibold">Микс против лупа</h3>
-                <span className={cn("flex items-center gap-1.5 font-mono text-xs", LIGHTS[light].text)}>
-                  ● {LIGHT_LABEL[light]}
-                  <span className="text-muted-foreground font-mono text-[10px]" title="Вердикт ядра из SelfCheckReport">
+              <header className="flex flex-col gap-1">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-card-foreground text-sm font-semibold">Микс против лупа</h3>
+                  <span
+                    className={cn(
+                      "flex items-center gap-1.5 whitespace-nowrap font-mono text-xs",
+                      LIGHTS[light].text,
+                    )}
+                  >
+                    <LightDot label={LIGHT_LABEL[light]} light={light} />
+                    {LIGHT_LABEL[light]}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <p
+                    className="text-muted-foreground min-w-0 truncate font-mono text-[11px]"
+                    title={selfCheckPath ?? undefined}
+                  >
+                    {fileName(selfCheckPath)}
+                  </p>
+                  <span
+                    className="text-muted-foreground shrink-0 font-mono text-[10px]"
+                    title="Вердикт ядра из SelfCheckReport"
+                  >
                     verdict: {report.verdict}
                   </span>
-                </span>
+                </div>
               </header>
-              <p
-                className="text-muted-foreground mt-0.5 truncate font-mono text-[11px]"
-                title={selfCheckPath ?? undefined}
-              >
-                {fileName(selfCheckPath)}
-              </p>
               <ul className="mt-1">
                 {rows.map((row) => (
                   <li className="border-border border-b py-1.5 last:border-b-0" key={row.metric}>
@@ -190,15 +219,17 @@ export function SelfCheckPanel() {
                   {fmt(mastering.achieved_lufs, 1)} LUFS · Δ {signed(mastering.delta)} LU
                 </p>
                 <p className="text-muted-foreground mt-0.5 text-[11px]">
-                  {mastering.applied === "normalize"
-                    ? "нормализация по пику до −0.1 dBFS"
-                    : "без нормализации"}{" "}
+                  {mastering.applied === "gain"
+                    ? "точный гейн до цели (служебная scratch-сессия движка)"
+                    : mastering.applied === "normalize"
+                      ? "normalize-потолок −0.1 dBFS: пикового запаса до цели не хватило"
+                      : "файл без изменений"}{" "}
                   · {mastering.measured_by === "analyzer" ? "замер анализатором по файлу" : "замер движком"}
                 </p>
                 {mastering.verdict !== "on_target" ? (
                   <p className="text-muted-foreground mt-0.5 text-[11px] leading-snug">
-                    Движок нормализует по пику, а не до LUFS — остаток до цели закрывается
-                    лимитером в DAW.
+                    Точный гейн сходится с целью, когда хватает запаса по пику; иначе нормализация
+                    упирается в потолок −0.1 dBFS — остаток закрывается лимитером в DAW.
                   </p>
                 ) : null}
               </section>
@@ -208,12 +239,16 @@ export function SelfCheckPanel() {
               <h3 className="text-muted-foreground text-[10px] tracking-wider uppercase">
                 Полосы · что добавили слои
               </h3>
-              {Object.keys(report.bands_delta).length > 0 ? (
-                <div className="mt-1.5">
-                  <BandDeltaBars deltas={bandDeltas(xray, report)} label="Прирост полос микса относительно лупа" />
-                </div>
-              ) : (
+              {Object.keys(report.bands_delta).length === 0 ? (
                 <p className="text-muted-foreground mt-1 text-xs">Отчёт без полос</p>
+              ) : bandsFlat(deltas) ? (
+                <p className="text-muted-foreground mt-1 text-xs leading-snug">
+                  Дельты полос равны нулю: прироста нет либо он меньше точности отчёта
+                </p>
+              ) : (
+                <div className="mt-1.5">
+                  <BandDeltaBars deltas={deltas} label="Прирост полос микса относительно лупа" />
+                </div>
               )}
             </section>
 
@@ -311,16 +346,37 @@ export function SelfCheckPanel() {
           options={TARGET_OPTIONS}
           value={target}
         />
-        <span className="inline-flex" title={exportTitle}>
-          <Button
-            disabled={!canExport || busy}
-            onClick={() => void exportAndCheck(target)}
-            size="sm"
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex min-w-0 flex-1" title={exportTitle}>
+            <Button
+              className="w-full justify-center"
+              disabled={!canExport || busy}
+              onClick={() => void exportAndCheck(target)}
+              size="sm"
+            >
+              <Download />
+              Сделать bounce и проверить
+            </Button>
+          </span>
+          <span
+            className="inline-flex"
+            title={
+              !engineUp
+                ? "Движок спит — рендерить нечего"
+                : "Рендер без цели громкости: файл уходит из приложения как есть"
+            }
           >
-            <Download />
-            Сделать bounce и проверить
-          </Button>
-        </span>
+            <Button
+              disabled={!canExport || busy}
+              onClick={() => void exportWav()}
+              size="sm"
+              variant="outline"
+            >
+              <Save />
+              Save WAV
+            </Button>
+          </span>
+        </div>
       </div>
     </div>
   );

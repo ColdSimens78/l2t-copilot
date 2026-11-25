@@ -21,11 +21,18 @@ export const LOUDNESS_DRIFT_LU = 2;
 /** Допуск цели громкости on_target ядра (ON_TARGET_LU). */
 export const TARGET_TOLERANCE_LU = 1;
 
-/** Цели громкости экспорта — те же константы, что у ядра (SPOTIFY_LUFS/APPLE_LUFS). */
-export const TARGETS: Record<Exclude<MasterTarget, "none">, { lufs: number; label: string }> = {
+/**
+ * Платформенные цели громкости — те же константы, что у ядра
+ * (SPOTIFY_LUFS/APPLE_LUFS). Цель "loop" (reference-matching) константы не
+ * имеет: её LUFS ядро резолвит из эталона Loop X-Ray при экспорте.
+ */
+export const TARGETS: Record<"spotify" | "apple", { lufs: number; label: string }> = {
   spotify: { lufs: -14, label: "Spotify" },
   apple: { lufs: -16, label: "Apple Music" },
 };
+
+/** Цели с константой LUFS (все, кроме none и loop). */
+export type ConstantTarget = keyof typeof TARGETS;
 
 /** Полосы анализатора по частотам. На проводе — алфавитный порядок (BTreeMap ядра). */
 const BAND_LABELS: Record<string, string> = {
@@ -97,8 +104,10 @@ export interface BandDelta {
   label: string;
   /** Короткая подпись для оси. */
   short: string;
-  /** Прирост полосы микса относительно лупа, дБ; null — полоса была тишиной или стала. */
+  /** Прирост полосы микса относительно лупа, дБ. */
   db: number | null;
+  /** Почему нет значения: полосы нет в отчёте либо она была тишиной или стала. */
+  missing: "absent" | "silence" | null;
 }
 
 /** «Что добавили слои»: bands_delta ядра — линейная энергия, показываем в дБ к лупу. */
@@ -107,16 +116,24 @@ export function bandDeltas(xray: XRayReport | null, report: SelfCheckReport): Ba
   return ids.map((id) => {
     const base = xray?.bands[id];
     const delta = report.bands_delta[id];
+    const measured = base !== undefined && base > 0 && delta !== undefined && base + delta > 0;
     return {
       id,
       label: BAND_LABELS[id] ?? id,
       short: BAND_SHORT[id] ?? BAND_LABELS[id] ?? id,
-      db:
-        base !== undefined && delta !== undefined && base > 0 && base + delta > 0
-          ? 10 * Math.log10((base + delta) / base)
-          : null,
+      db: measured ? 10 * Math.log10((base + delta) / base) : null,
+      missing: delta === undefined || base === undefined ? "absent" : measured ? null : "silence",
     };
   });
+}
+
+/**
+ * Отчёт не рассказывает о полосах: дельты отсутствуют либо все равны нулю.
+ * Нули бывают и честными (микс совпадает с лупом), и потерянными при округлении
+ * на стороне ядра — различить их UI не может, поэтому не утверждает «0 дБ».
+ */
+export function bandsFlat(deltas: BandDelta[]): boolean {
+  return deltas.every((d) => d.db === null || Math.abs(d.db) < 0.005);
 }
 
 /** Прирост в долях шкалы: −1..1 (за пределами ±12 дБ — упирается в край). */
@@ -137,7 +154,7 @@ export function tempoAltHint(bpm: number, alt: number): string | null {
 }
 
 /** До цели платформы: > 0 — тише цели, < 0 — громче. */
-export function platformGap(lufs: number, target: Exclude<MasterTarget, "none">): number {
+export function platformGap(lufs: number, target: ConstantTarget): number {
   return TARGETS[target].lufs - lufs;
 }
 
@@ -188,15 +205,25 @@ export function mixLufs(
   return xray ? xray.lufs + report.lufs_delta : null;
 }
 
-/** Сколько не хватает до цели: > 0 — микс тише цели, < 0 — громче. */
-export function targetGap(lufs: number, target: MasterTarget): number | null {
-  return target === "none" ? null : TARGETS[target].lufs - lufs;
+/**
+ * Сколько не хватает до цели: > 0 — микс тише цели, < 0 — громче. Для
+ * "loop" цель — громкость лупа (reference), для констант — TARGETS; none —
+ * цели нет.
+ */
+export function targetGap(
+  lufs: number,
+  target: MasterTarget,
+  loopLufs: number | null,
+): number | null {
+  if (target === "none") return null;
+  if (target === "loop") return loopLufs === null ? null : loopLufs - lufs;
+  return TARGETS[target].lufs - lufs;
 }
 
 export function targetLabel(target: MasterTarget): string {
-  return target === "none"
-    ? "без цели"
-    : `${TARGETS[target].label} ${fmt(TARGETS[target].lufs, 0)} LUFS`;
+  if (target === "none") return "без цели";
+  if (target === "loop") return "уровень лупа";
+  return `${TARGETS[target].label} ${fmt(TARGETS[target].lufs, 0)} LUFS`;
 }
 
 export function loudnessLight(report: SelfCheckReport): Light {
