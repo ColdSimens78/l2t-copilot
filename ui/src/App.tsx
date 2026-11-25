@@ -13,7 +13,7 @@ import { ToastHost } from "@/components/cockpit/toast-host";
 import { DropZone } from "@/screens/s1-drop-zone";
 import { CenterStage } from "@/screens/center-stage";
 
-/** Центр: до Loop X-Ray — drop-зона лупа (S1), после — слои партий. */
+/** Центр: до Loop X-Ray — drop-зона лупа (S1), после — тумблер Слои / Playlist (S4/S5). */
 function Center() {
   const { xray } = useCockpit();
   return (

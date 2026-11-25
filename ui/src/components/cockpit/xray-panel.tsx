@@ -148,7 +148,8 @@ export function XRayPanel() {
       </p>
     );
   }
-  if (lowTempo) {
+  // низкая уверенность темпа — повод проверить до применения; после него не актуальна
+  if (lowTempo && !applied) {
     note = (
       <>
         {note}
@@ -197,7 +198,14 @@ export function XRayPanel() {
                 { value: xray.bpm, label: fmt(xray.bpm, 1), title: "основная гипотеза" },
                 {
                   value: xray.bpm_alt,
-                  label: `${fmt(xray.bpm_alt, 1)}${altHint ? ` · ${altHint}` : ""}`,
+                  label: altHint ? (
+                    <span className="flex flex-col leading-tight">
+                      <span>{fmt(xray.bpm_alt, 1)}</span>
+                      <span className="text-muted-foreground text-[10px]">{altHint}</span>
+                    </span>
+                  ) : (
+                    fmt(xray.bpm_alt, 1)
+                  ),
                   title: "альтернативная гипотеза анализатора",
                 },
               ]}

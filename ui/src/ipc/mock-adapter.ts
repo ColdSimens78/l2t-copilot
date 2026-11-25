@@ -64,7 +64,14 @@ const state = {
   /** Новая сессия движка стартует с 120 BPM и без key-маркера (паритет с ядром). */
   tempo: 120,
   keyMarker: null as string | null,
-  tracks: [] as { id: string; name: string; part: string }[],
+  /** Дорожки сессии — та же проекция, что отдаёт ядро: клипы с границами в сэмплах. */
+  tracks: [] as {
+    id: string;
+    name: string;
+    part: string;
+    kind: string;
+    clips: { start: number; end: number; notes: number }[];
+  }[],
   fault: "none" as FaultKind,
   nextTrackId: 7,
   current: {} as Record<string, CurrentPart>,
@@ -279,11 +286,17 @@ function selfCheckReport(bouncePath: string, fault: FaultKind): SelfCheckReport 
   if (!state.loopAnalyzed) {
     throw new Error("нет эталона — сначала analyze_loop(loop.wav)");
   }
+  // как ядро: дельта на каждую полосу лупа, встречающуюся и в миксе
   const bands_delta: Record<string, number> = {};
+  for (const band of Object.keys(LOOP_BANDS)) bands_delta[band] = 0;
   for (const t of state.tracks) {
     for (const [band, v] of Object.entries(LAYER_BANDS[t.part] ?? {})) {
-      bands_delta[band] = round2((bands_delta[band] ?? 0) + v);
+      bands_delta[band] += v;
     }
+  }
+  // линейная энергия — 1e-4…1e-7: округлять до 2 знаков нельзя, останутся нули
+  for (const band of Object.keys(bands_delta)) {
+    bands_delta[band] = Math.round(bands_delta[band] * 1e7) / 1e7;
   }
   const bounceLufs =
     fault === "selfcheck_loud_warn"
@@ -370,7 +383,17 @@ export const mockAdapter: CockpitApi & {
       }
       const trackId = state.nextTrackId++;
       const name = `MIDI ${trackId - 6}`;
-      state.tracks.push({ id: `track-${trackId}`, name, part });
+      // импорт ложится с начала сессии; длина клипа — по нотам и темпу партии
+      const suggestion = buildSuggestion(part, cur.params, version, "accepted");
+      const beats = suggestion.notes.reduce((max, n) => Math.max(max, n.end), 0) / 480;
+      const end = Math.round(((beats * 60) / Number(suggestion.params.bpm)) * 44100);
+      state.tracks.push({
+        id: `track-${trackId}`,
+        name,
+        part,
+        kind: "midi",
+        clips: [{ start: 0, end, notes: suggestion.notes.length }],
+      });
       cur.status = "accepted";
       emitSuggestion(part);
       // imported_tracks — имена дорожек движка (как в ядре)

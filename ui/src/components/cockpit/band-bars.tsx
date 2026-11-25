@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
 
 export function BandBars({ bars, label }: { bars: BandBar[]; label: string }) {
   return (
-    <ul aria-label={label} className="flex h-24 gap-1">
+    <ul aria-label={label} className="flex h-16 gap-1">
       {bars.map((bar) => (
         <li
           className="flex h-full min-w-0 flex-1 flex-col gap-1"
