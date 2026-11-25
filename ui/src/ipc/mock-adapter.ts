@@ -390,8 +390,9 @@ export const mockAdapter: CockpitApi & {
     return runCommand("adopt_loop", async () => {
       await delay(400);
       state.tempo = Math.round(bpm * 10) / 10;
-      state.keyMarker = `Key: ${key}`;
-      return { tempo: state.tempo, marker: state.keyMarker };
+      state.keyMarker = key;
+      // как ядро: ответ отдаёт имя маркера «Key: …», сессия — тональность без префикса
+      return { tempo: state.tempo, marker: `Key: ${key}` };
     });
   },
 

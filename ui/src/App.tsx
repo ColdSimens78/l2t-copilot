@@ -7,6 +7,7 @@ import { ApiContext, currentAdapter } from "@/ipc/api";
 import { CockpitProvider, useCockpit } from "@/store/cockpit";
 import { TopBar } from "@/components/cockpit/top-bar";
 import { ChannelRack } from "@/components/cockpit/channel-rack";
+import { XRayPanel } from "@/components/cockpit/xray-panel";
 import { AiDock } from "@/components/cockpit/ai-dock";
 import { ToastHost } from "@/components/cockpit/toast-host";
 import { DropZone } from "@/screens/s1-drop-zone";
@@ -31,11 +32,9 @@ function App() {
           <div className="grid min-h-0 flex-1 grid-cols-[300px_minmax(0,1fr)_320px] gap-2">
             <ChannelRack />
             <Center />
-            <aside className="bg-card flex flex-col rounded-2xl border p-3">
-              <h2 className="text-card-foreground text-sm font-semibold">Loop X-Ray</h2>
-              <p className="text-muted-foreground mt-2 text-xs">
-                Отчёт по лупу и Self-Check появятся здесь после анализа.
-              </p>
+            <aside aria-label="AI Panel" className="bg-card flex min-h-0 flex-col rounded-2xl border p-3">
+              <h2 className="text-card-foreground mb-2 shrink-0 text-sm font-semibold">Loop X-Ray</h2>
+              <XRayPanel />
             </aside>
           </div>
           <AiDock />

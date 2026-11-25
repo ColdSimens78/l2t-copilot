@@ -5,12 +5,14 @@
  * поэтому словарь проверяется тестами без окна.
  */
 import type {
+  BusState,
   MasterTarget,
   MasteringVerdict,
   SelfCheckReport,
   XRayReport,
 } from "@/types/contract";
 import { fmt, signed } from "@/lib/format";
+import { stripKeyMarker } from "@/lib/parts";
 
 /** Ниже этой уверенности значение рисуется приглушённым и жёлтым (спека S2). */
 export const LOW_CONFIDENCE = 0.7;
@@ -36,13 +38,35 @@ const BAND_LABELS: Record<string, string> = {
   brilliance: "воздух",
 };
 
+/** Подписи под столбиками (в 7–8 знаков); полные — в подсказках. */
+const BAND_SHORT: Record<string, string> = {
+  sub_bass: "суб",
+  bass: "бас",
+  low_mid: "низ",
+  mid: "сер",
+  upper_mid: "верх",
+  presence: "през",
+  brilliance: "возд",
+};
+
 export interface BandBar {
   id: string;
   label: string;
+  /** Короткая подпись для оси. */
+  short: string;
   /** Линейная энергия полосы — как отдал анализатор. */
   value: number;
-  /** Уровень относительно самой громкой полосы, дБ; null — тишины или максимума нет. */
+  /** Уровень относительно самой громкой полосы, дБ; null — максимума нет. */
   db: number | null;
+}
+
+/** Окно спектра: столбик самой тихой полосы — на 40 дБ ниже самой громкой. */
+export const SPECTRUM_RANGE_DB = 40;
+
+/** Высота столбика 0..1 по уровню в дБ от максимума (null — тишина). */
+export function spectrumLevel(db: number | null): number {
+  if (db === null) return 0.04;
+  return Math.min(1, Math.max(0.04, 1 + db / SPECTRUM_RANGE_DB));
 }
 
 /** Полосы в порядке частот; неизвестные имена — в конце, как есть. */
@@ -58,15 +82,21 @@ export function bandBars(bands: Record<string, number>): BandBar[] {
     return {
       id,
       label: BAND_LABELS[id] ?? id,
+      short: BAND_SHORT[id] ?? BAND_LABELS[id] ?? id,
       value,
       db: value > 0 && max > 0 ? 10 * Math.log10(value / max) : null,
     };
   });
 }
 
+/** Полный размах шкалы прироста: ±12 дБ от лупа. */
+export const DELTA_RANGE_DB = 12;
+
 export interface BandDelta {
   id: string;
   label: string;
+  /** Короткая подпись для оси. */
+  short: string;
   /** Прирост полосы микса относительно лупа, дБ; null — полоса была тишиной или стала. */
   db: number | null;
 }
@@ -80,12 +110,54 @@ export function bandDeltas(xray: XRayReport | null, report: SelfCheckReport): Ba
     return {
       id,
       label: BAND_LABELS[id] ?? id,
+      short: BAND_SHORT[id] ?? BAND_LABELS[id] ?? id,
       db:
         base !== undefined && delta !== undefined && base > 0 && base + delta > 0
           ? 10 * Math.log10((base + delta) / base)
           : null,
     };
   });
+}
+
+/** Прирост в долях шкалы: −1..1 (за пределами ±12 дБ — упирается в край). */
+export function deltaLevel(db: number | null): number {
+  if (db === null) return 0;
+  return Math.max(-1, Math.min(1, db / DELTA_RANGE_DB));
+}
+
+// ─── Loop X-Ray: гипотезы и сессия ─────────────────────────────────────────
+
+/** Допуск хэт-локов — как у tempo_match ядра (×2 / ½). */
+export function tempoAltHint(bpm: number, alt: number): string | null {
+  if (bpm <= 0) return null;
+  const ratio = alt / bpm;
+  if (Math.abs(ratio - 2) <= 0.06) return "возможно ×2";
+  if (Math.abs(ratio - 0.5) <= 0.03) return "возможно ½";
+  return null;
+}
+
+/** До цели платформы: > 0 — тише цели, < 0 — громче. */
+export function platformGap(lufs: number, target: Exclude<MasterTarget, "none">): number {
+  return TARGETS[target].lufs - lufs;
+}
+
+export type AdoptState = "applied" | "different" | "pending";
+
+/**
+ * Как сессия относится к настройкам лупа: applied — тот же темп и та же
+ * тональность; different — сессия уже приняла другой луп; pending — key-маркера
+ * в сессии ещё нет (партии идут по X-Ray).
+ */
+export function adoptState(
+  busState: Pick<BusState, "engine" | "tempo" | "key_marker"> | null,
+  bpm: number,
+  key: string,
+): AdoptState {
+  if (busState?.engine !== "up" || busState.key_marker === null) return "pending";
+  const sameKey = stripKeyMarker(busState.key_marker) === key;
+  const sameTempo = busState.tempo !== null && Math.abs(busState.tempo - bpm) < 0.05;
+  if (sameKey && sameTempo) return "applied";
+  return "different";
 }
 
 // ─── Светофор Self-Check ───────────────────────────────────────────────────
@@ -190,6 +262,12 @@ export function overallLight(rows: VerdictRow[]): Light {
   if (rows.some((r) => r.light === "fail")) return "fail";
   if (rows.some((r) => r.light === "warn")) return "warn";
   return "ok";
+}
+
+/** Лампа блока цели громкости: в допуске — ok, тише или громче цели — warn, тишина — fail. */
+export function masteringLight(verdict: MasteringVerdict): Light {
+  if (verdict === "on_target") return "ok";
+  return verdict === "silent" ? "fail" : "warn";
 }
 
 /** Вердикт цели громкости из отчёта экспорта — словами (MasteringVerdict ядра). */
