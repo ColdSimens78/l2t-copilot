@@ -9,7 +9,7 @@
 //! event.tempo, file.import_midi (bass_am90.mid), file.bounce_mix →
 //! WAV + LUFS. Все вызовы bounded (таймауты); процессы kill_on_drop.
 //!
-//! env: L2T_SOUNDCRAFT (бинарь, дефолт /home/ilmir/bin/soundcraft-cli)
+//! env: L2T_SOUNDCRAFT (бинарь, дефолт ~/bin/soundcraft-cli)
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -27,10 +27,10 @@ const CALL: Duration = Duration::from_secs(90);
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bin =
-        std::env::var("L2T_SOUNDCRAFT").unwrap_or_else(|_| l2t_core::config::SOUNDCRAFT_BIN.into());
+        std::env::var("L2T_SOUNDCRAFT").unwrap_or_else(|_| l2t_core::config::soundcraft_bin().display().to_string());
     let ws = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| l2t_core::config::SOUNDCRAFT_WORKSPACE.into());
+        .unwrap_or_else(|| l2t_core::config::soundcraft_workspace().display().to_string());
     let ws_path = Path::new(&ws).canonicalize()?;
     let mid = ws_path.join("bass_am90.mid");
     if !mid.is_file() {

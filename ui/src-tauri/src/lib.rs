@@ -251,7 +251,7 @@ static E2E_DONE: AtomicBool = AtomicBool::new(false);
 
 fn e2e_js() -> Option<String> {
     // CC0-лупы OSS-разведки; берём первый найденный FLAC
-    let examples = PathBuf::from("/home/ilmir/l2t-copilot/examples");
+    let examples = home_examples_dir();
     let mut flacs: Vec<PathBuf> = std::fs::read_dir(&examples)
         .ok()?
         .filter_map(|e| e.ok())
@@ -335,6 +335,13 @@ fn run_e2e_once(webview: &tauri::Webview) {
 // ------------------------------------------------------------- вход ------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn home_examples_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/opt/l2t"))
+        .join("l2t-copilot/examples")
+}
+
 pub fn run() {
     tauri::Builder::default()
         .on_page_load(|webview, payload| {

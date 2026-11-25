@@ -1,9 +1,9 @@
 //! Конфигурация серверов шины: что и как спавнить.
 //!
-//! Пресеты — машина Ilmir (пути этапа 1); каждый переопределяется
-//! переменной окружения, чтобы ядро работало в другом окружении без
-//! правки кода. Правила конфига из README действуют и здесь: абсолютные
-//! пути, никакого шаблонизатора.
+//! Пути — от домашнего каталога пользователя (env HOME); каждый
+//! переопределяется переменной окружения, чтобы ядро работало в любом
+//! окружении без правки кода. Правила конфига из README действуют и
+//! здесь: абсолютные пути, никакого шаблонизатора.
 
 use std::collections::HashMap;
 use std::env;
@@ -22,10 +22,25 @@ pub struct ServerConfig {
     pub env: HashMap<String, String>,
 }
 
-pub const MIDI_GEN_PRIMARY: &str = "/home/ilmir/l2t-copilot/.venv/bin/l2t-midi-gen";
-pub const MIDI_GEN_FALLBACK_PY: &str = "/home/ilmir/midi-env/bin/python";
-pub const MIDI_GEN_PYTHONPATH: &str = "/home/ilmir/l2t-copilot/src";
-pub const AUDIO_ANALYZER_BIN: &str = "/home/ilmir/bin/mcp-server";
+fn home_dir() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/opt/l2t"))
+}
+
+/// Консольный скрипт репо-venv (создаётся `pip install -e '.'`).
+pub fn midi_gen_primary() -> PathBuf {
+    home_dir().join("l2t-copilot/.venv/bin/l2t-midi-gen")
+}
+pub fn midi_gen_fallback_py() -> PathBuf {
+    home_dir().join("midi-env/bin/python")
+}
+pub fn midi_gen_pythonpath() -> PathBuf {
+    home_dir().join("l2t-copilot/src")
+}
+pub fn audio_analyzer_bin() -> PathBuf {
+    home_dir().join("bin/mcp-server")
+}
 
 fn executable(path: &Path) -> bool {
     path.is_file()
@@ -46,20 +61,20 @@ pub fn resolve_midi_gen() -> ServerConfig {
             env: HashMap::new(),
         };
     }
-    let primary = Path::new(MIDI_GEN_PRIMARY);
-    if executable(primary) {
+    let primary = midi_gen_primary();
+    if executable(&primary) {
         ServerConfig {
             name: "midi-gen",
-            command: primary.to_path_buf(),
+            command: primary,
             args: vec![],
             env: HashMap::new(),
         }
     } else {
         ServerConfig {
             name: "midi-gen",
-            command: PathBuf::from(MIDI_GEN_FALLBACK_PY),
+            command: midi_gen_fallback_py(),
             args: vec!["-m".into(), "mcp_servers.midi_gen.server".into()],
-            env: [("PYTHONPATH".to_string(), MIDI_GEN_PYTHONPATH.to_string())]
+            env: [("PYTHONPATH".to_string(), midi_gen_pythonpath().display().to_string())]
                 .into_iter()
                 .collect(),
         }
@@ -70,7 +85,7 @@ pub fn resolve_midi_gen() -> ServerConfig {
 pub fn resolve_audio_analyzer() -> ServerConfig {
     let command = env::var_os("L2T_AUDIO_ANALYZER")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(AUDIO_ANALYZER_BIN));
+        .unwrap_or_else(audio_analyzer_bin);
     ServerConfig {
         name: "audio-analyzer",
         command,
@@ -79,8 +94,12 @@ pub fn resolve_audio_analyzer() -> ServerConfig {
     }
 }
 
-pub const SOUNDCRAFT_BIN: &str = "/home/ilmir/bin/soundcraft-cli";
-pub const SOUNDCRAFT_WORKSPACE: &str = "/home/ilmir/music-workspace";
+pub fn soundcraft_bin() -> PathBuf {
+    home_dir().join("bin/soundcraft-cli")
+}
+pub fn soundcraft_workspace() -> PathBuf {
+    home_dir().join("music-workspace")
+}
 /// Стем рабочей сессии кокпита: `<workspace>/cockpit.scraft`.
 pub const SESSION_STEM: &str = "cockpit";
 
@@ -96,7 +115,7 @@ pub fn resolve_export_dir() -> PathBuf {
 pub fn resolve_soundcraft_workspace() -> PathBuf {
     env::var_os("L2T_SOUNDCRAFT_WORKSPACE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(SOUNDCRAFT_WORKSPACE))
+        .unwrap_or_else(soundcraft_workspace)
 }
 
 /// Пресет слота «Движка»: SoundCraft v0.20.1 standalone headless-MCP
@@ -109,7 +128,7 @@ pub fn resolve_soundcraft_workspace() -> PathBuf {
 /// L2T_SOUNDCRAFT.
 pub fn resolve_soundcraft() -> ServerConfig {
     let command =
-        env::var_os("L2T_SOUNDCRAFT").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(SOUNDCRAFT_BIN));
+        env::var_os("L2T_SOUNDCRAFT").map(PathBuf::from).unwrap_or_else(soundcraft_bin);
     let ws = resolve_soundcraft_workspace().display().to_string();
     ServerConfig {
         name: "soundcraft",
@@ -159,17 +178,18 @@ mod tests {
     fn midi_gen_resolves_to_runnable_form() {
         let cfg = resolve_midi_gen();
         assert_eq!(cfg.name, "midi-gen");
-        if cfg.command == Path::new(MIDI_GEN_PRIMARY) {
+        let primary = midi_gen_primary();
+        if cfg.command == primary {
             // primary должен быть исполняемым — иначе взяли бы fallback
             assert!(executable(&cfg.command));
             assert!(cfg.args.is_empty());
         } else {
             // fallback: python -m mcp_servers.midi_gen.server + PYTHONPATH
-            assert_eq!(cfg.command, Path::new(MIDI_GEN_FALLBACK_PY));
+            assert_eq!(cfg.command, midi_gen_fallback_py());
             assert_eq!(cfg.args, vec!["-m", "mcp_servers.midi_gen.server"]);
             assert_eq!(
                 cfg.env.get("PYTHONPATH").map(String::as_str),
-                Some(MIDI_GEN_PYTHONPATH)
+                Some(midi_gen_pythonpath().display().to_string()).as_deref()
             );
         }
     }

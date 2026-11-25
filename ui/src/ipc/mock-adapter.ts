@@ -37,7 +37,7 @@ import type { CockpitApi, Unsubscribe } from "@/ipc/api";
 import { GENERATIONS } from "@/mock/generations";
 import { TARGETS } from "@/lib/xray";
 
-const WORKSPACE = "/home/ilmir/music-workspace/";
+const WORKSPACE = "~/music-workspace/";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const round2 = (v: number) => Math.round(v * 100) / 100;
 

@@ -15,8 +15,8 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { resolveDropPath, useFileDrop, type DroppedFile } from "@/lib/use-file-drop";
 
-const DEMO_LOOP = "/home/ilmir/music-workspace/loop_am90.wav";
-const OUTSIDE_LOOP = "/home/ilmir/Downloads/loop_am90.wav";
+const DEMO_LOOP = "~/music-workspace/loop_am90.wav";
+const OUTSIDE_LOOP = "~/Downloads/loop_am90.wav";
 
 export function DropZone() {
   const { analyzing, xrayError, analyzeLoop, retryAnalyze, dismissXrayError } = useCockpit();

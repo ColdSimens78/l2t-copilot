@@ -1,133 +1,133 @@
 {
- "new_session": {
-  "name": "contract-v0201",
-  "sample_rate": 44100
- },
- "event.tempo": {
-  "bpm": 90.0,
-  "tick": 0
- },
- "markers.add": {
-  "id": 1,
-  "number": 1
- },
- "file.import_midi": {
-  "tracks": [
-   2
-  ]
- },
- "bounce_mix": {
-  "bytes": 706314,
-  "lufs": -29.60540771484375,
-  "path": "/home/ilmir/.zcode/workspace/24b4fa4d-9864-4ddb-ae9c-49a5325fd9bf/bounce_contract_v0201.wav",
-  "peak_db": -18.719945907592773,
-  "seconds": 2.6666666666666665,
-  "true_peak_db": -18.719945907592773
- },
- "session.inspect": {
-  "bit_depth": "Int24",
-  "busses": [],
-  "dirty": true,
-  "edit_mode": "Slip",
-  "frame_rate": "30",
-  "grid": "1/16 note",
-  "groups": [],
-  "length_samples": 117600,
-  "main_format": "Stereo",
-  "markers": [
-   {
-    "end": 0,
-    "id": 1,
-    "kind": "Marker",
-    "name": "Key: A minor",
-    "number": 1,
-    "start": 0
-   }
-  ],
-  "meter": [
-   {
-    "denominator": 4,
-    "numerator": 4,
-    "tick": 0
-   }
-  ],
-  "name": "contract-v0201",
-  "nudge": "1 second",
-  "path": null,
-  "redo": null,
-  "sample_rate": 44100,
-  "selection": {
-   "clips": [],
-   "end": 0,
-   "start": 0,
-   "tracks": []
+  "new_session": {
+    "name": "contract-v0201",
+    "sample_rate": 44100
   },
-  "sources": [],
-  "tempo": [
-   {
+  "event.tempo": {
     "bpm": 90.0,
     "tick": 0
-   }
-  ],
-  "tool": "Smart",
-  "tracks": [
-   {
-    "automation": [],
-    "automation_mode": "read",
-    "clips": [
-     {
-      "end": 117600,
-      "fade_in": 0,
-      "fade_out": 0,
-      "gain_db": 0.0,
-      "id": 3,
-      "length": 117600,
-      "locked": false,
-      "muted": false,
-      "name": "MIDI 1",
-      "notes": 5,
-      "start": 0,
-      "start_time": "0:00.000"
-     }
-    ],
-    "format": "Stereo",
-    "height": "medium",
-    "hidden": false,
-    "id": 2,
-    "inactive": false,
-    "input": "None",
-    "inserts": [],
-    "instrument": "subtractive_synth",
-    "kind": "instrument",
-    "mute": false,
-    "name": "MIDI 1",
-    "output": "Main",
-    "pan": [
-     -1.0,
-     1.0
-    ],
-    "playlist": "MIDI 1",
-    "playlists": 1,
-    "record_arm": false,
-    "sends": [],
-    "solo": false,
-    "surround": null,
-    "view": "notes",
-    "volume_db": 0.0
-   }
-  ],
-  "transport": {
-   "playing": false,
-   "position": 0,
-   "recording": false
   },
-  "undo": "MIDI...",
-  "zoom": {
-   "samples_per_px": 1024.0,
-   "scroll": 0
+  "markers.add": {
+    "id": 1,
+    "number": 1
+  },
+  "file.import_midi": {
+    "tracks": [
+      2
+    ]
+  },
+  "bounce_mix": {
+    "bytes": 706314,
+    "lufs": -29.60540771484375,
+    "path": "<workspace>/bounce_contract_v0201.wav",
+    "peak_db": -18.719945907592773,
+    "seconds": 2.6666666666666665,
+    "true_peak_db": -18.719945907592773
+  },
+  "session.inspect": {
+    "bit_depth": "Int24",
+    "busses": [],
+    "dirty": true,
+    "edit_mode": "Slip",
+    "frame_rate": "30",
+    "grid": "1/16 note",
+    "groups": [],
+    "length_samples": 117600,
+    "main_format": "Stereo",
+    "markers": [
+      {
+        "end": 0,
+        "id": 1,
+        "kind": "Marker",
+        "name": "Key: A minor",
+        "number": 1,
+        "start": 0
+      }
+    ],
+    "meter": [
+      {
+        "denominator": 4,
+        "numerator": 4,
+        "tick": 0
+      }
+    ],
+    "name": "contract-v0201",
+    "nudge": "1 second",
+    "path": null,
+    "redo": null,
+    "sample_rate": 44100,
+    "selection": {
+      "clips": [],
+      "end": 0,
+      "start": 0,
+      "tracks": []
+    },
+    "sources": [],
+    "tempo": [
+      {
+        "bpm": 90.0,
+        "tick": 0
+      }
+    ],
+    "tool": "Smart",
+    "tracks": [
+      {
+        "automation": [],
+        "automation_mode": "read",
+        "clips": [
+          {
+            "end": 117600,
+            "fade_in": 0,
+            "fade_out": 0,
+            "gain_db": 0.0,
+            "id": 3,
+            "length": 117600,
+            "locked": false,
+            "muted": false,
+            "name": "MIDI 1",
+            "notes": 5,
+            "start": 0,
+            "start_time": "0:00.000"
+          }
+        ],
+        "format": "Stereo",
+        "height": "medium",
+        "hidden": false,
+        "id": 2,
+        "inactive": false,
+        "input": "None",
+        "inserts": [],
+        "instrument": "subtractive_synth",
+        "kind": "instrument",
+        "mute": false,
+        "name": "MIDI 1",
+        "output": "Main",
+        "pan": [
+          -1.0,
+          1.0
+        ],
+        "playlist": "MIDI 1",
+        "playlists": 1,
+        "record_arm": false,
+        "sends": [],
+        "solo": false,
+        "surround": null,
+        "view": "notes",
+        "volume_db": 0.0
+      }
+    ],
+    "transport": {
+      "playing": false,
+      "position": 0,
+      "recording": false
+    },
+    "undo": "MIDI...",
+    "zoom": {
+      "samples_per_px": 1024.0,
+      "scroll": 0
+    }
+  },
+  "edit.undo": {
+    "undone": true
   }
- },
- "edit.undo": {
-  "undone": true
- }
 }

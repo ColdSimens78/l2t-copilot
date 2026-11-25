@@ -35,7 +35,7 @@
 | **rustc / cargo / rustup** | ❌ нет | в репо трикси — 1.85.1 (отстаёт от stable); рекомендую rustup |
 | RAM / диск | ✅ есть | 30 GiB / 95 GiB свободно |
 
-Проверка выполнялась: `node/npm/pnpm/rustc/cargo --version`, `dpkg-query`, `apt-cache policy/depends`, поиск скрытых установок (`~/.nvm`, `~/.cargo`, `~/.rustup`, `/usr/local/bin/node*` — ничего нет; rustup Ilmir сознательно не ставил ранее, см. память).
+Проверка выполнялась: `node/npm/pnpm/rustc/cargo --version`, `dpkg-query`, `apt-cache policy/depends`, поиск скрытых установок (`~/.nvm`, `~/.cargo`, `~/.rustup`, `/usr/local/bin/node*` — ничего нет; rustup до этого не ставился — осознанное решение).
 
 ## 3. Команды доустановки (владелец выполняет сам)
 
