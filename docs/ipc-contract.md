@@ -179,3 +179,25 @@ Golden снят живым на обеих версиях (см. `crates/l2t-cor
    сдвигается ровно на величину гейна: демо-сессия −19.37 LUFS при пике
    −4.35 → −15.12 при пике −0.1. LUFS-цель добивает ядро точным гейном
    (v0.2.2, служебная scratch-сессия).
+
+## v0.3 candidates: mix-команды (P-Mix groundwork — предложено, НЕ в контракте)
+
+Ядро уже умеет (методы `CockpitCore`, вне таблицы команд; UI подключит их
+при bump v0.3 вместе с типизированным `MixSnapshot` и Tauri-командами):
+
+| Метод | Вход | Выход (passthrough движка) |
+|---|---|---|
+| `mix_volume` | `{tracks?: id[], db? \| delta_db?}` — ровно одно из `db` (−144..12) / `delta_db` | `{tracks: N}` |
+| `mix_pan` | `{tracks?: id[], pan: −1..1}` | `{pan}` |
+| `mix_mute` | `{tracks?: id[], on}` | `{value}` |
+| `mix_solo` | `{tracks?: id[], on}` | `{value}` |
+| `mix_snapshot` | — | `{engine: 'up'\|'down', tracks: [{id, name, kind, volume_db, pan, mute, solo}]}` |
+
+- Треки — id из `mix_snapshot` / `BusState.tracks`; `tracks` опущен —
+  семантика движка (все/выделенные).
+- `get_bus_state` уже несёт уровни в проекции треков (v0.2.2): `volume_db`,
+  `pan` (моно = `[значение]`, стерео = `[L, R]`), `mute`, `solo`.
+- Ошибки bounded: «ровно одно из db / delta_db», диапазоны `db`/`pan`,
+  движок не подключён. Ответы движка проходят насквозь (passthrough).
+- Журнал шины пишет вызовы как `mix_volume` / `mix_pan` / `mix_mute` /
+  `mix_solo` / `mix_snapshot`.

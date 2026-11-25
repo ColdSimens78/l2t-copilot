@@ -33,6 +33,17 @@ fn mock_config() -> Option<ServerConfig> {
     })
 }
 
+/// Мок движка с mix-формами (execute/inspect_session, состояние в памяти).
+fn mock_mix_config() -> Option<ServerConfig> {
+    let py = which("python3")?;
+    Some(ServerConfig {
+        name: "soundcraft",
+        command: py,
+        args: vec![fixture("mock_mix_server.py").display().to_string()],
+        env: HashMap::new(),
+    })
+}
+
 fn which(bin: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
@@ -165,6 +176,13 @@ async fn generate_part_produces_contract_suggestion() {
     let err = core.accept_part(Part::Bass, 2).await.unwrap_err();
     assert!(err.to_string().contains("движок SoundCraft не подключён"));
 
+    // P-Mix groundwork без движка: bounded-ошибка и снимок down
+    let err = core.mix_volume(None, Some(-3.0), None).await.unwrap_err();
+    assert!(err.to_string().contains("не подключён"), "got: {err}");
+    let snap = core.mix_snapshot().await;
+    assert_eq!(snap["engine"], json!("down"));
+    assert_eq!(snap["tracks"], json!([]));
+
     // журнал шины накопился (для события bus_log)
     let log = core.take_bus_log();
     assert!(log.iter().any(|e| e.command == "generate_part" && e.status.is_ok()));
@@ -284,6 +302,126 @@ async fn analyze_loop_returns_xray_report_and_self_check() {
     let an = slots["servers"].as_array().unwrap().iter()
         .find(|s| s["slot"] == json!("audio-analyzer")).unwrap();
     assert_eq!(an["alive"], json!(true));
+    core.shutdown().await;
+}
+
+// ------------------------------------------------- P-Mix groundwork ----
+
+/// Фасады mix_* строят точные формы команд движка (echo мока сверяет
+/// фасад с движком), ошибки валидации bounded, журнал шины ведётся.
+#[tokio::test]
+async fn mix_facades_echo_engine_forms_on_mock() {
+    let Some(cfg) = mock_mix_config() else {
+        eprintln!("SKIP: python3 не найден");
+        return;
+    };
+    let broken_an = ServerConfig {
+        name: "audio-analyzer",
+        command: PathBuf::from("/nonexistent/mcp-server"),
+        args: vec![],
+        env: HashMap::new(),
+    };
+    let broken_midi = ServerConfig {
+        name: "midi-gen",
+        command: PathBuf::from("/nonexistent/l2t-midi-gen"),
+        args: vec![],
+        env: HashMap::new(),
+    };
+    let mut core = CockpitCore::connect_in(broken_an, broken_midi, tempfile_staging("mixmock")).await;
+    core.attach_engine(cfg).await.expect("мок-движок");
+
+    // громкость: абсолют и дельта; echo возвращает точную форму вызова
+    let res = core
+        .mix_volume(Some(&[1, 2]), Some(-3.5), None)
+        .await
+        .expect("mix_volume db");
+    assert_eq!(res["echo"]["command"], json!("mix.volume"));
+    assert_eq!(res["echo"]["params"], json!({"tracks": [1, 2], "db": -3.5}));
+    assert_eq!(res["tracks"], json!(2));
+
+    let res = core.mix_volume(None, None, Some(1.5)).await.expect("mix_volume delta");
+    assert_eq!(
+        res["echo"]["params"],
+        json!({"delta_db": 1.5}),
+        "без треков ключ tracks опущен"
+    );
+
+    // валидация: ровно одно из db/delta_db, диапазон db, диапазон pan
+    let err = core.mix_volume(None, Some(-3.0), Some(1.0)).await.unwrap_err();
+    assert!(err.to_string().contains("ровно одно"), "got: {err}");
+    let err = core.mix_volume(None, Some(20.0), None).await.unwrap_err();
+    assert!(err.to_string().contains("−144..12"), "got: {err}");
+    let res = core.mix_pan(Some(&[2]), -0.3).await.expect("mix_pan");
+    assert_eq!(res["echo"]["params"], json!({"tracks": [2], "pan": -0.3}));
+    let err = core.mix_pan(None, 1.5).await.unwrap_err();
+    assert!(err.to_string().contains("−1..1"), "got: {err}");
+
+    let res = core.mix_mute(Some(&[1]), true).await.expect("mix_mute");
+    assert_eq!(res["echo"]["params"], json!({"tracks": [1], "on": true}));
+    assert_eq!(res["value"], json!(true));
+    let res = core.mix_solo(None, false).await.expect("mix_solo");
+    assert_eq!(res["echo"]["params"], json!({"on": false}));
+
+    // движение зафиксировано в журнале шины (для события bus_log)
+    let log = core.take_bus_log();
+    for cmd in ["mix_volume", "mix_pan", "mix_mute", "mix_solo"] {
+        assert!(
+            log.iter().any(|e| e.command == cmd && e.status.is_ok()),
+            "нет {cmd} в журнале шины"
+        );
+    }
+    core.shutdown().await;
+}
+
+/// mix_snapshot и get_bus_state несут уровни треков; применённые
+/// mix-команды видны в снимке (мок хранит состояние).
+#[tokio::test]
+async fn mix_snapshot_and_bus_state_carry_levels_on_mock() {
+    let Some(cfg) = mock_mix_config() else {
+        eprintln!("SKIP: python3 не найден");
+        return;
+    };
+    let broken_an = ServerConfig {
+        name: "audio-analyzer",
+        command: PathBuf::from("/nonexistent/mcp-server"),
+        args: vec![],
+        env: HashMap::new(),
+    };
+    let broken_midi = ServerConfig {
+        name: "midi-gen",
+        command: PathBuf::from("/nonexistent/l2t-midi-gen"),
+        args: vec![],
+        env: HashMap::new(),
+    };
+    let mut core = CockpitCore::connect_in(broken_an, broken_midi, tempfile_staging("mixsnap")).await;
+    core.attach_engine(cfg).await.expect("мок-движок");
+
+    core.mix_volume(Some(&[1]), Some(-9.5), None).await.expect("volume");
+    core.mix_mute(Some(&[2]), true).await.expect("mute");
+
+    let snap = core.mix_snapshot().await;
+    assert_eq!(snap["engine"], json!("up"));
+    let tracks = snap["tracks"].as_array().unwrap();
+    let bass = tracks.iter().find(|t| t["name"] == json!("Bass")).unwrap();
+    assert_eq!(bass["volume_db"], json!(-9.5));
+    assert_eq!(bass["pan"], json!([0.0]), "моно-пан — массив со значением");
+    assert_eq!(bass["mute"], json!(false));
+    let chords = tracks.iter().find(|t| t["name"] == json!("Chords")).unwrap();
+    assert_eq!(chords["mute"], json!(true));
+    assert_eq!(chords["solo"], json!(false));
+
+    // get_bus_state: та же телеметрия в контрактной проекции треков
+    let state = core.get_bus_state().await;
+    let sv = serde_json::to_value(&state).unwrap();
+    assert_eq!(sv["engine"], json!("up"));
+    let master = sv["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["kind"] == json!("master"))
+        .unwrap();
+    assert_eq!(master["volume_db"], json!(0.0));
+    assert_eq!(master["pan"], json!([-1.0, 1.0]), "стерео-пан — пара L/R");
     core.shutdown().await;
 }
 
@@ -636,6 +774,43 @@ async fn working_session_lifecycle_and_persistence() {
         .expect("generate");
     let acc = core.accept_part(Part::Bass, s.version).await.expect("accept→import");
     assert!(!acc.imported_tracks.is_empty());
+
+    // 2b) P-Mix groundwork: живой mix_volume на рабочей сессии standalone-
+    // движка — громкость импортированного трека сдвигается на дельту
+    let track_id = {
+        let state = core.get_bus_state().await;
+        state
+            .tracks
+            .iter()
+            .find_map(|t| t.get("id").and_then(serde_json::Value::as_u64))
+            .expect("трек партии в сессии")
+    };
+    let vol_before = core
+        .mix_snapshot()
+        .await["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == json!(track_id))
+        .and_then(|t| t["volume_db"].as_f64());
+    let res = core
+        .mix_volume(Some(&[track_id]), None, Some(1.5))
+        .await
+        .expect("живой mix_volume");
+    assert!(res.get("tracks").is_some(), "форма ответа движка: {res}");
+    let vol_after = core.mix_snapshot().await["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == json!(track_id))
+        .and_then(|t| t["volume_db"].as_f64())
+        .expect("volume_db в снимке после mix_volume");
+    if let Some(vb) = vol_before {
+        assert!(
+            (vol_after - vb - 1.5).abs() < 0.01,
+            "volume_db {vb} → {vol_after}, ожидался сдвиг +1.5"
+        );
+    }
 
     // 3) идемпотентность: повторный Accept той же версии — bounded-ошибка
     let err = core.accept_part(Part::Bass, s.version).await.unwrap_err();

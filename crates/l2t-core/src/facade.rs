@@ -526,7 +526,8 @@ impl CockpitCore {
                         .map(|n| n["Key: ".len()..].trim().to_string())
                 })
             });
-        // компактная проекция треков (TS tracks: unknown[])
+        // компактная проекция треков (TS tracks: unknown[]) — с v0.2.2
+        // несёт уровни микса для AI Mix Assistant (P-Mix groundwork)
         let tracks: Vec<Value> = v
             .get("tracks")
             .and_then(Value::as_array)
@@ -538,6 +539,10 @@ impl CockpitCore {
                             "name": t.get("name"),
                             "kind": t.get("kind"),
                             "instrument": t.get("instrument"),
+                            "volume_db": t.get("volume_db"),
+                            "pan": t.get("pan"),
+                            "mute": t.get("mute"),
+                            "solo": t.get("solo"),
                             "clips": t.get("clips").and_then(Value::as_array).map(|cs| {
                                 cs.iter().map(|c| json!({
                                     "start": c.get("start"),
@@ -609,6 +614,121 @@ impl CockpitCore {
 
     pub async fn health(&self) -> Value {
         json!({"ok": self.audio_analyzer.is_some() || self.midi_gen.is_some()})
+    }
+
+    // --------------------------------------------- P-Mix groundwork v0 ----
+
+    /// Служебный вызов mix-команды движка. Методы вне ipc-контракта
+    /// (кандидаты v0.3 — см. docs/ipc-contract.md): Фронтенд подключит их
+    /// после bump; ответы движка проходят насквозь (passthrough), ошибки
+    /// bounded, журнал шины пишет вызовы как mix_volume/mix_pan/…
+    async fn mix_command(
+        &mut self,
+        facade_cmd: &str,
+        engine_cmd: &str,
+        params: Value,
+    ) -> CoreResult<Value> {
+        let engine = self.engine.as_ref().ok_or_else(|| CoreError::Tool {
+            tool: "mix_assistant".into(),
+            message: "движок SoundCraft не подключён (см. get_mcp_slots / Screen 0)".into(),
+        })?;
+        let (_, v) = call_logged(
+            &mut self.bus_log,
+            engine,
+            "execute",
+            facade_cmd,
+            json!({"command": engine_cmd, "params": params}),
+            self.call_timeout,
+        )
+        .await?;
+        Ok(v)
+    }
+
+    /// **Громкость треков** (P-Mix groundwork): абсолют `db` (−144..12)
+    /// или относительный `delta_db` — ровно одно из двух. Треки — id из
+    /// `mix_snapshot`/`get_bus_state`; без `tracks` — семантика движка
+    /// (все/выделенные).
+    pub async fn mix_volume(
+        &mut self,
+        tracks: Option<&[u64]>,
+        db: Option<f64>,
+        delta_db: Option<f64>,
+    ) -> CoreResult<Value> {
+        match (db, delta_db) {
+            (Some(db), None) => {
+                if !(-144.0..=12.0).contains(&db) {
+                    return Err(CoreError::Tool {
+                        tool: "mix_volume".into(),
+                        message: format!("db должен быть −144..12, получил {db}"),
+                    });
+                }
+                self.mix_command("mix_volume", "mix.volume", mix_gain_params(tracks, "db", db))
+                    .await
+            }
+            (None, Some(delta_db)) => self
+                .mix_command(
+                    "mix_volume",
+                    "mix.volume",
+                    mix_gain_params(tracks, "delta_db", delta_db),
+                )
+                .await,
+            _ => Err(CoreError::Tool {
+                tool: "mix_volume".into(),
+                message: "ровно одно из db / delta_db".into(),
+            }),
+        }
+    }
+
+    /// **Панорама треков** (P-Mix groundwork): −1..1.
+    pub async fn mix_pan(&mut self, tracks: Option<&[u64]>, pan: f64) -> CoreResult<Value> {
+        if !(-1.0..=1.0).contains(&pan) {
+            return Err(CoreError::Tool {
+                tool: "mix_pan".into(),
+                message: format!("pan должен быть −1..1, получил {pan}"),
+            });
+        }
+        self.mix_command("mix_pan", "mix.pan", mix_gain_params(tracks, "pan", pan))
+            .await
+    }
+
+    /// **Mute треков** (P-Mix groundwork): A/B-проверки, диагностика
+    /// маскировки.
+    pub async fn mix_mute(&mut self, tracks: Option<&[u64]>, on: bool) -> CoreResult<Value> {
+        self.mix_command("mix_mute", "mix.mute", mix_switch_params(tracks, on))
+            .await
+    }
+
+    /// **Solo треков** (P-Mix groundwork): послушать партию отдельно.
+    pub async fn mix_solo(&mut self, tracks: Option<&[u64]>, on: bool) -> CoreResult<Value> {
+        self.mix_command("mix_solo", "mix.solo", mix_switch_params(tracks, on))
+            .await
+    }
+
+    /// **Снимок уровней микса** (P-Mix groundwork, вне ipc-контракта):
+    /// `session.inspect` → по треку {id, name, kind, volume_db, pan, mute,
+    /// solo}. Движок не подключён/не отвечает → engine: down, tracks: [].
+    pub async fn mix_snapshot(&mut self) -> Value {
+        let Some(engine) = self.engine.as_ref() else {
+            return json!({"engine": "down", "tracks": []});
+        };
+        let Ok((_, v)) = call_logged(
+            &mut self.bus_log,
+            engine,
+            "inspect_session",
+            "mix_snapshot",
+            json!({"detail": "summary"}),
+            self.call_timeout,
+        )
+        .await
+        else {
+            return json!({"engine": "down", "tracks": []});
+        };
+        let tracks: Vec<Value> = v
+            .get("tracks")
+            .and_then(Value::as_array)
+            .map(|ts| ts.iter().map(mix_track_level).collect())
+            .unwrap_or_default();
+        json!({"engine": "up", "tracks": tracks})
     }
 
     /// **Рабочая сессия пользователя** (зазор №1 спайка, ратифицировано):
@@ -1152,6 +1272,40 @@ fn create_dir(dir: &Path, tool: &str) -> CoreResult<()> {
     std::fs::create_dir_all(dir).map_err(|e| CoreError::Tool {
         tool: tool.into(),
         message: format!("не создал {}: {e}", dir.display()),
+    })
+}
+
+/// Параметры mix-команды с числовым полем (`db`/`delta_db`/`pan`); ключ
+/// `tracks` опускается, когда треки не выбраны (семантика движка).
+fn mix_gain_params(tracks: Option<&[u64]>, key: &str, value: f64) -> Value {
+    let mut params = Map::new();
+    if let Some(tracks) = tracks {
+        params.insert("tracks".into(), json!(tracks));
+    }
+    params.insert(key.into(), json!(value));
+    Value::Object(params)
+}
+
+/// Параметры mix.mute / mix.solo: `{tracks?, on}`.
+fn mix_switch_params(tracks: Option<&[u64]>, on: bool) -> Value {
+    let mut params = Map::new();
+    if let Some(tracks) = tracks {
+        params.insert("tracks".into(), json!(tracks));
+    }
+    params.insert("on".into(), json!(on));
+    Value::Object(params)
+}
+
+/// Проекция уровней одного трека из inspect (mix_snapshot и get_bus_state).
+fn mix_track_level(t: &Value) -> Value {
+    json!({
+        "id": t.get("id"),
+        "name": t.get("name"),
+        "kind": t.get("kind"),
+        "volume_db": t.get("volume_db"),
+        "pan": t.get("pan"),
+        "mute": t.get("mute"),
+        "solo": t.get("solo"),
     })
 }
 
