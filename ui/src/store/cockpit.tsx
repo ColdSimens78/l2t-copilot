@@ -180,6 +180,8 @@ export interface CockpitStore {
   selfCheckPath: string | null;
   selfCheckError: string | null;
   dismissSelfCheckError: () => void;
+  /** Повтор последнего действия проверки — файла рендера или экспорта. */
+  selfCheckRetry: { label: string; run: () => Promise<void> } | null;
   /** Последний экспорт: громкость и блок цели, пока проверен его файл. */
   lastExport: ExportTrackOutput | null;
   exporting: boolean;
@@ -251,6 +253,10 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   const [selfCheck, setSelfCheck] = useState<SelfCheckReport | null>(null);
   const [selfCheckPath, setSelfCheckPath] = useState<string | null>(null);
   const [selfCheckError, setSelfCheckError] = useState<string | null>(null);
+  const [selfCheckRetry, setSelfCheckRetry] = useState<{
+    label: string;
+    run: () => Promise<void>;
+  } | null>(null);
   const [lastExport, setLastExport] = useState<ExportTrackOutput | null>(null);
   const [exporting, setExporting] = useState(false);
   const [busLog, setBusLog] = useState<BusLogEvent[]>([]);
@@ -582,10 +588,11 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   }, [acceptPart]);
 
   const runSelfCheck = useCallback(
-    async (bouncePath: string) => {
+    async function runSelfCheck(bouncePath: string) {
       setChecking(true);
       setSelfCheckError(null);
       setSelfCheck(null);
+      setSelfCheckRetry({ label: "Повторить проверку", run: () => runSelfCheck(bouncePath) });
       const report = await run(
         "run_self_check",
         undefined,
@@ -600,6 +607,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       // блок цели показываем, только когда проверен файл последнего экспорта
       setLastExport((prev) => (prev?.path === bouncePath ? prev : null));
       if (report) {
+        setSelfCheckRetry(null);
         setSelfCheck(report);
         setSelfCheckPath(bouncePath);
       }
@@ -609,14 +617,17 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
 
   const exportAndCheck = useCallback(async function exportAndCheck(target: MasterTarget) {
     setExporting(true);
+    setSelfCheckError(null);
+    setSelfCheckRetry({ label: "Повторить экспорт", run: () => exportAndCheck(target) });
     const result = await run<ExportTrackOutput>(
       "export_track",
       undefined,
       () => api.exportTrack({ target }),
       {
+        // ошибку показывает и вкладка Self-Check, и toast
+        onError: setSelfCheckError,
         detail: target === "none" ? undefined : `цель ${targetLabel(target)}`,
         effect: (r) => `→ ${fmt(r.seconds)} с · ${fmt(r.lufs)} LUFS`,
-        retry: () => void exportAndCheck(target),
       },
     );
     setExporting(false);
@@ -636,7 +647,10 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const dismissXrayError = useCallback(() => setXrayError(null), []);
-  const dismissSelfCheckError = useCallback(() => setSelfCheckError(null), []);
+  const dismissSelfCheckError = useCallback(() => {
+    setSelfCheckError(null);
+    setSelfCheckRetry(null);
+  }, []);
 
   const requestRackFocus = useCallback(() => setRackFocusAt(Date.now()), []);
 
@@ -679,6 +693,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       selfCheckPath,
       selfCheckError,
       dismissSelfCheckError,
+      selfCheckRetry,
       lastExport,
       exporting,
       canExport: busState?.engine === "up" && (busState.tracks?.length ?? 0) > 0,
@@ -709,7 +724,7 @@ export function CockpitProvider({ children }: { children: ReactNode }) {
       hostStatus, busState, loopFile, analyzing, xray, xrayError, dismissXrayError,
       selectedBpm, adopting, channels, musicContext, rackFocusAt, requestRackFocus,
       selectChannelVersion, markAuditioned, checking, selfCheck, selfCheckPath,
-      selfCheckError, dismissSelfCheckError, lastExport, exporting, busLog, drawerOpen,
+      selfCheckError, dismissSelfCheckError, selfCheckRetry, lastExport, exporting, busLog, drawerOpen,
       dockPending, dockLine, dockBackground, dismissDock, toasts, pushToast, dismissToast,
       analyzeLoop, retryAnalyze, adoptLoop, generatePart, regenerate, retryChannel,
       acceptPart, rejectPart, acceptAllReady, runSelfCheck, exportAndCheck, refreshBusState,

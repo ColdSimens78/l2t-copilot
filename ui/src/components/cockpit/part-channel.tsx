@@ -19,6 +19,7 @@ import {
   type ChipValues,
 } from "@/lib/parts";
 import { previewKey, stopPreview, togglePreview, usePlayingPreview } from "@/lib/preview-player";
+import { PULSE_DELAY, useDelayed } from "@/lib/use-delayed";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Confidence } from "@/components/cockpit/confidence";
@@ -29,26 +30,8 @@ import { VersionHistory } from "@/components/cockpit/version-history";
 import { cn } from "@/lib/utils";
 
 const NO_CONTEXT = "Сначала разбери луп: темп и тональность партий берутся из Loop X-Ray";
-const PULSE_DELAY = 300;
 const PREVIEW_POLL_MS = 500;
 const PREVIEW_POLL_TRIES = 30;
-
-/** Флаг включается с задержкой: индикация не мигает на быстрых операциях. */
-function useDelayed(active: boolean, ms: number): boolean {
-  const [armed, setArmed] = useState(false);
-  const [wasActive, setWasActive] = useState(active);
-  // сброс при выключении — во время рендера (React: adjust state on change)
-  if (active !== wasActive) {
-    setWasActive(active);
-    if (!active) setArmed(false);
-  }
-  useEffect(() => {
-    if (!active) return;
-    const timer = window.setTimeout(() => setArmed(true), ms);
-    return () => window.clearTimeout(timer);
-  }, [active, ms]);
-  return active && armed;
-}
 
 /**
  * C2: превью-WAV ищем по конвенции staging/<part>_v<N>.wav, пока файл не
